@@ -1,7 +1,9 @@
 moddir=$(prefix)/share/guile/site/2.0
 godir = $(libdir)/guile/2.0/ccache
 
-SOURCES =					\
+SOURCES = \
+	dlhacks/elf.scm \
+	dlhacks/dwarf.scm \
 	dlhacks.scm
 GOBJECTS = $(SOURCES:%.scm=%.go)
 
