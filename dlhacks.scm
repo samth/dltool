@@ -27,17 +27,28 @@
 ;;; Code:
 
 (define-module (dlhacks)
-  #:use-module (system vm elf)
-  #:use-module (system vm dwarf)
+  #:use-module (dlhacks elf)
+  #:use-module (dlhacks dwarf)
   #:use-module (ice-9 match)
   #:use-module (ice-9 rdelim)
   #:use-module (ice-9 regex)
-  #:use-module (ice-9 ftw)
+  #:use-module ((ice-9 i18n) #:select (string-locale<?))
   #:use-module (rnrs bytevectors)
   #:use-module (srfi srfi-1)
+  #:use-module (srfi srfi-26)
   #:export (system-library-search-path
-            
+            find-library
             ))
+
+(define (scandir path selector)
+  (let ((dir (opendir path)))
+    (let lp ((out '()))
+      (let ((ent (readdir dir)))
+        (if (eof-object? ent)
+            (sort out string-locale<?)
+            (lp (if (selector ent)
+                    (cons ent out)
+                    out)))))))
 
 (define (join-path head)
   (string-join (reverse head) "/"))
@@ -82,13 +93,12 @@
             (dir (join-path head)))
         (catch #t
           (lambda ()
-            (filter-map (lambda (s)
-                          (let ((b (basename s)))
-                            (and (not (equal? b "."))
-                                 (not (equal? b ".."))
-                                 (regexp-exec pat b)
-                                 b)))
-                        (scandir dir)))
+            (scandir dir
+                     (lambda (s)
+                       (and (not (equal? s "."))
+                            (not (equal? s ".."))
+                            (regexp-exec pat s)
+                            s))))
           (lambda _ '())))
       (list s)))
 
@@ -134,3 +144,48 @@
 (define system-library-search-path
   (let ((p (delay (load-conf "/etc/ld.so.conf"))))
     (lambda () (force p))))
+
+(define (find-library-candidates stem search-path extension)
+  (append-map
+   (lambda (path)
+     (filter-map (lambda (base)
+                   (let ((f (string-append path "/" base)))
+                     (and (not (file-is-directory? f))
+                          f)))
+                 (scandir path
+                          (lambda (f)
+                            (match (string-split f #\.)
+                              (((? (cut equal? <> stem))
+                                (? (cut equal? <> extension))
+                                _ ...) #t)
+                              (_ #f))))))
+   search-path))
+
+(define* (find-library stem #:key
+                       (search-path (system-library-search-path))
+                       (extension "so")
+                       version)
+  (define (so-version f)
+    (match (cddr (string-split (basename f) #\.))
+      (() #t) ; Unversioned.
+      ((v . _) (string->number v))))
+  
+  (let ((candidates (find-library-candidates stem search-path extension)))
+    (if version
+        ;; Find a library with a particular version.
+        (find (lambda (elt) (equal? (so-version elt) version))
+              candidates)
+        ;; Otherwise, find the first unversioned library.  If none is
+        ;; found, return the path with the highest version.
+        (let lp ((in candidates) (candidate #f))
+          (if (null? in)
+              candidate
+              (let ((v (so-version (car in))))
+                (if (equal? v #t)
+                    ;; We have our unversioned match.
+                    (car in)
+                    (lp (cdr in)
+                        (if (or (not candidate)
+                                (and v (> v (so-version candidate))))
+                            (car in)
+                            candidate)))))))))
