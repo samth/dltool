@@ -46,6 +46,11 @@
             elf-section-link elf-section-info elf-section-addralign
             elf-section-entsize
 
+            make-elf-symbol elf-symbol?
+            elf-symbol-name elf-symbol-value elf-symbol-size
+            elf-symbol-info elf-symbol-other elf-symbol-shndx
+            elf-symbol-binding elf-symbol-type elf-symbol-visibility
+
             SHT_NULL SHT_PROGBITS SHT_SYMTAB SHT_STRTAB SHT_RELA
             SHT_HASH SHT_DYNAMIC SHT_NOTE SHT_NOBITS SHT_REL SHT_SHLIB
             SHT_DYNSYM SHT_INIT_ARRAY SHT_FINI_ARRAY SHT_PREINIT_ARRAY
@@ -67,9 +72,19 @@
             DT_GUILE_RTL_VERSION DT_HIGUILE DT_LOOS DT_HIOS DT_LOPROC
             DT_HIPROC
 
+            STB_LOCAL STB_GLOBAL STB_WEAK STB_NUM STB_LOOS STB_GNU
+            STB_HIOS STB_LOPROC STB_HIPROC
+
+            STT_NOTYPE STT_OBJECT STT_FUNC STT_SECTION STT_FILE
+            STT_COMMON STT_TLS STT_NUM STT_LOOS STT_GNU STT_HIOS
+            STT_LOPROC STT_HIPROC
+
+            STV_DEFAULT STV_INTERNAL STV_HIDDEN STV_PROTECTED
+
             parse-elf
             elf-segment elf-segments
             elf-section elf-sections elf-sections-by-name
+            elf-symbol-table-ref
 
             (make-string-table . make-elf-string-table)
             (string-table-intern . elf-string-table-intern)
@@ -735,6 +750,125 @@
                                    (+ off (elf-section-name section)))
                  section))
          sections)))
+
+(define-record-type <elf-symbol>
+  (make-elf-symbol name value size info other shndx)
+  elf-symbol?
+  (name elf-symbol-name)
+  (value elf-symbol-value)
+  (size elf-symbol-size)
+  (info elf-symbol-info)
+  (other elf-symbol-other)
+  (shndx elf-symbol-shndx))
+
+;; typedef struct {
+;;     uint32_t      st_name;
+;;     Elf32_Addr    st_value;
+;;     uint32_t      st_size;
+;;     unsigned char st_info;
+;;     unsigned char st_other;
+;;     uint16_t      st_shndx;
+;; } Elf32_Sym;
+
+(define (parse-elf32-symbol bv offset stroff byte-order)
+  (if (<= (+ offset 16) (bytevector-length bv))
+      (make-elf-symbol (let ((name (bytevector-u32-ref bv offset byte-order)))
+                         (if stroff
+                             (string-table-ref bv (+ stroff name))
+                             name))
+                       (bytevector-u32-ref bv (+ offset 4) byte-order)
+                       (bytevector-u32-ref bv (+ offset 8) byte-order)
+                       (bytevector-u8-ref bv (+ offset 12))
+                       (bytevector-u8-ref bv (+ offset 13))
+                       (bytevector-u16-ref bv (+ offset 14) byte-order))
+      (error "corrupt ELF (offset out of range)" offset)))
+
+;; typedef struct {
+;;     uint32_t      st_name;
+;;     unsigned char st_info;
+;;     unsigned char st_other;
+;;     uint16_t      st_shndx;
+;;     Elf64_Addr    st_value;
+;;     uint64_t      st_size;
+;; } Elf64_Sym;
+
+(define (parse-elf64-symbol bv offset stroff byte-order)
+  (if (<= (+ offset 24) (bytevector-length bv))
+      (make-elf-symbol (let ((name (bytevector-u32-ref bv offset byte-order)))
+                         (if stroff
+                             (string-table-ref bv (+ stroff name))
+                             name))
+                       (bytevector-u64-ref bv (+ offset 8) byte-order)
+                       (bytevector-u64-ref bv (+ offset 16) byte-order)
+                       (bytevector-u8-ref bv (+ offset 4))
+                       (bytevector-u8-ref bv (+ offset 5))
+                       (bytevector-u16-ref bv (+ offset 6) byte-order))
+      (error "corrupt ELF (offset out of range)" offset)))
+
+(define* (elf-symbol-table-ref elf section n #:optional strtab)
+  (let ((bv (elf-bytes elf))
+        (byte-order (elf-byte-order elf))
+        (stroff (and strtab (elf-section-offset strtab)))
+        (base (elf-section-offset section))
+        (len (elf-section-size section))
+        (entsize (elf-section-entsize section)))
+    (unless (<= (* (1+ n) entsize) len)
+      (error "out of range symbol table access" section n))
+    (case (elf-word-size elf)
+      ((4)
+       (unless (<= 16 entsize)
+         (error "bad entsize for symbol table" section))
+       (parse-elf32-symbol bv (+ base (* n entsize)) stroff byte-order))
+      ((8)
+       (unless (<= 24 entsize)
+         (error "bad entsize for symbol table" section))
+       (parse-elf64-symbol bv (+ base (* n entsize)) stroff byte-order))
+      (else (error "bad word size" elf)))))
+
+;; Legal values for ST_BIND subfield of st_info (symbol binding).
+
+(define STB_LOCAL	0)		; Local symbol
+(define STB_GLOBAL	1)		; Global symbol
+(define STB_WEAK	2)		; Weak symbol
+(define STB_NUM		3)		; Number of defined types. 
+(define STB_LOOS	10)		; Start of OS-specific
+(define STB_GNU_UNIQUE	10)		; Unique symbol. 
+(define STB_HIOS	12)		; End of OS-specific
+(define STB_LOPROC	13)		; Start of processor-specific
+(define STB_HIPROC	15)		; End of processor-specific
+
+;; Legal values for ST_TYPE subfield of st_info (symbol type).
+
+(define STT_NOTYPE	0)		; Symbol type is unspecified
+(define STT_OBJECT	1)		; Symbol is a data object
+(define STT_FUNC	2)		; Symbol is a code object
+(define STT_SECTION	3)		; Symbol associated with a section
+(define STT_FILE	4)		; Symbol's name is file name
+(define STT_COMMON	5)		; Symbol is a common data object
+(define STT_TLS		6)		; Symbol is thread-local data objec
+(define STT_NUM		7)		; Number of defined types. 
+(define STT_LOOS	10)		; Start of OS-specific
+(define STT_GNU_IFUNC	10)		; Symbol is indirect code object
+(define STT_HIOS	12)		; End of OS-specific
+(define STT_LOPROC	13)		; Start of processor-specific
+(define STT_HIPROC	15)		; End of processor-specific
+
+;; Symbol visibility specification encoded in the st_other field.
+
+(define STV_DEFAULT	0)		; Default symbol visibility rules
+(define STV_INTERNAL	1)		; Processor specific hidden class
+(define STV_HIDDEN	2)		; Sym unavailable in other modules
+(define STV_PROTECTED	3)		; Not preemptible, not exported
+
+(define (elf-symbol-binding sym)
+  (ash (elf-symbol-info sym) -4))
+
+(define (elf-symbol-type sym)
+  (logand (elf-symbol-info sym) #xf))
+
+(define (elf-symbol-visibility sym)
+  (logand (elf-symbol-other sym) #x3))
+
 
 
 
