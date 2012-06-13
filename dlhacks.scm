@@ -166,20 +166,21 @@
      (load-conf (ld-so-conf)))))
 
 (define (find-library-candidates stem search-path extension)
-  (append-map
-   (lambda (path)
-     (filter-map (lambda (base)
-                   (let ((f (string-append path "/" base)))
-                     (and (not (file-is-directory? f))
-                          f)))
-                 (scandir path
-                          (lambda (f)
-                            (match (string-split f #\.)
-                              (((? (cut equal? <> stem))
-                                (? (cut equal? <> extension))
-                                _ ...) #t)
-                              (_ #f))))))
-   search-path))
+  (let* ((head (string-append stem "." extension))
+         (len (string-length head)))
+    (append-map
+     (lambda (path)
+       (filter-map
+        (lambda (base)
+          (let ((f (string-append path "/" base)))
+            (and (not (file-is-directory? f))
+                 f)))
+        (scandir path
+                 (lambda (f)
+                   (or (string= head f)
+                       (and (string= head f 0 len)
+                            (string-prefix? "." (substring f len))))))))
+     search-path)))
 
 (define (has-elf-magic? file)
   (has-elf-header?
