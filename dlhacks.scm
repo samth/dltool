@@ -1,5 +1,5 @@
 ;; guile-dlhacks
-;; Copyright (C) 2012 Andy Wingo <wingo at pobox dot com>
+;; Copyright (C) 2012 Andy Wingo <wingo@igalia.com>
 
 ;; This library is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU Lesser General Public License as
@@ -42,7 +42,9 @@
   #:export (global-debug-path
             system-library-search-path
             find-library
-            find-debug-object))
+            find-debug-object
+            extract-exported-symbols
+            extract-definitions))
 
 (define global-debug-path
   (make-parameter "/usr/lib/debug"))
@@ -302,32 +304,36 @@
 
   (let ((tag (die-tag die))
         (kids (die-children die)))
-    (cons tag
-          (fold-right
-           visit-attr
-           (case tag
-             ((subprogram subroutine-type)
-              (let ((formals (map recur
-                                  (filter (has-tag? 'formal-parameter)
-                                          kids)))
-                    (varargs (find (has-tag? 'unspecified-parameters)
-                                   kids)))
-                (list
-                 (cons 'args
-                       (if varargs
-                           (append formals (list recur varargs))
-                           formals)))))
-             ((structure-type union-type class-type)
-              (if (die-ref die 'declaration)
-                  '()
-                  (list (cons 'members (map recur kids)))))
-             ((enumeration-type)
-              (list (cons 'literals (map recur kids))))
-             (else
-              (unless (null? kids)
-                (error "unexpected children" die))
-              '()))
-           (die-attrs die) (die-vals die)))))
+    (cond
+     ((die-ref die 'declaration)
+      (type-name die))
+     (else
+      (cons tag
+            (fold-right
+             visit-attr
+             (case tag
+               ((subprogram subroutine-type)
+                (let ((formals (map recur
+                                    (filter (has-tag? 'formal-parameter)
+                                            kids)))
+                      (varargs (find (has-tag? 'unspecified-parameters)
+                                     kids)))
+                  (list
+                   (cons 'args
+                         (if varargs
+                             (append formals (list recur varargs))
+                             formals)))))
+               ((structure-type union-type class-type)
+                (list (cons 'members (map recur kids))))
+               ((enumeration-type)
+                (list (cons 'literals (map recur kids))))
+               ((array-type)
+                (map recur kids))
+               (else
+                (unless (null? kids)
+                  (error "unexpected children" die))
+                '()))
+             (die-attrs die) (die-vals die)))))))
 
 (define (type-name die)
   (list (case (die-tag die)
@@ -340,7 +346,7 @@
         (or (die-ref die 'name)
             (error "anonymous type should not get here"))))
 
-(define (find-definitions symbols debuginfo)
+(define (extract-definitions names debuginfo)
   (let ((by-offset (make-hash-table))
         (externs (make-hash-table))
         (types-by-die (make-hash-table))
@@ -350,36 +356,35 @@
           (error "unknown offset")))
     (define (intern-type die)
       (or (hashq-ref types-by-die die)
-          (let* ((name (type-name die))
-                 (decl (extract-declaration die resolve-die intern-type)))
-            (cond
-             ((vhash-assoc name types-by-name)
-              => (lambda (pair)
-                   (let ((name* (car pair))
-                         (decl* (cdr pair)))
-                     (unless (equal? decl decl*)
-                       (error "two types with the same name but different decls"
-                              decl decl*))
-                     name*)))
-             (else
-              (set! types-by-name (vhash-cons name decl types-by-name))
-              (hashq-set! types-by-die die name)
-              name)))))
+          (let* ((name (type-name die)))
+            (hashq-set! types-by-die die name)
+            (let ((decl (extract-declaration die resolve-die intern-type)))
+              (match (vhash-assoc name types-by-name)
+                ((name* . decl*)
+                 (unless (equal? decl decl*)
+                   (error "two types with the same name but different decls"
+                          decl decl*)))
+                (#f
+                 (set! types-by-name (vhash-cons name decl types-by-name))))
+              name))))
     (define (intern-die die)
       (hashv-set! by-offset (die-offset die) die)
       (when (die-ref die 'external)
         (let ((name (die-ref die 'name)))
           (when name
-            (hash-set! externs name die))))
+            (when (case (die-tag die)
+                    ((subprogram variable)
+                     (not (die-ref die 'declaration)))
+                    (else #t))
+              (hash-set! externs name die)))))
       (for-each intern-die (die-children die)))
     (for-each intern-die debuginfo)
-    (let ((tail (map (lambda (s)
-                       (let* ((name (elf-symbol-name s))
-                              (die (hash-ref externs name)))
+    (let ((tail (map (lambda (name)
+                       (let ((die (hash-ref externs name)))
                          (unless die
                            (error "No debugging information for symbol" name))
                          (extract-declaration die resolve-die intern-type)))
-                     symbols)))
+                     names)))
       (append (vhash-fold (lambda (name decl tail)
                             (cons decl tail))
                           '()
