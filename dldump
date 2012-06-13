@@ -1,7 +1,7 @@
 #!/usr/bin/env guile
 -*- scheme -*-
 !#
-;; dlgrovel
+;; dldump
 ;; Copyright (C) 2012 Andy Wingo <wingo@igalia.com>
 
 ;; This library is free software; you can redistribute it and/or modify
@@ -21,7 +21,7 @@
 ;; 59 Temple Place - Suite 330        Fax:    +1-617-542-2652
 ;; Boston, MA  02111-1307,  USA       gnu@gnu.org
 
-(define-module (dlgrovel)
+(define-module (dldump)
   #:use-module (ice-9 getopt-long)
   #:use-module (ice-9 command-line)
   #:use-module (ice-9 match)
@@ -38,20 +38,20 @@
     (debug)))
 
 (define (display-version)
-  (version-etc "dlgrovel"
+  (version-etc "dldump"
                "0.1.0"
                #:copyright-holder "Andy Wingo <wingo@igalia.com>"
-               #:command-name "dlgrovel"
+               #:command-name "dldump"
                #:license *LGPLv3+*))
 
 (define* (display-usage #:optional (port (current-output-port)))
-  (display "Usage: dlgrovel [--help] [--version] LIB SYM...\n" port))
+  (display "Usage: dldump [--help] [--version] LIB\n" port))
 
 (define (help args)
   (display-usage)
-  (display "Grovel a library for debugging information.
+  (display "Parse all debugging information out of a library.
 
-dlgrovel loads the ELF shared library LIB, and find its associated
+dldump loads the ELF shared library LIB, and find its associated
 debugging information, possibly in a separate file.  If LIB is a bare
 file name, without a slash, it is searched for in the load path.  The
 load path is found by parsing the /etc/ld.so.conf file and the
@@ -63,18 +63,14 @@ packages.  In that case, the loadable .so file has a link to the
 separate debug object.  This tool will load separate debug objects, if
 needed.
 
-If dlgrovel is passed one or more SYM names, declarations of all those
-symbols are printed on the console.  Otherwise dlgrovel prints
-declarations for all exported symbols.
+dldump prints all information that it can find out to the console.  It's
+a bit much, but it's useful for debugging.
 ")
-  (emit-bug-reporting-address "dlgrovel" "wingo@igalia.com"
+  (emit-bug-reporting-address "dldump" "wingo@igalia.com"
                               #:url "https://gitorious.org/guile-dlhacks/"))
 
 (define (load-elf file)
   (parse-elf (call-with-input-file file get-bytevector-all)))
-
-(define (all-exports lib-path)
-  (map elf-symbol-name (extract-exported-symbols (load-elf lib-path))))
 
 (define (load-debug lib-path)
   (let ((dbg (find-debug-object lib-path)))
@@ -83,16 +79,13 @@ declarations for all exported symbols.
     (read-debuginfo
      (elf->dwarf-context (load-elf dbg) 0 0))))
 
-(define (dlgrovel lib names)
+(define (dldump lib)
   (let* ((lib-path (if (string-index lib #\/)
                        lib
                        (find-library lib))))
     (unless lib-path
       (error "Failed to find library" lib))
-    (extract-definitions (if (null? names)
-                             (all-exports lib-path)
-                             names)
-                         (load-debug lib-path))))
+    (debuginfo->tree (load-debug lib-path))))
 
 (define (main args)
   (setlocale LC_ALL "")
@@ -106,10 +99,12 @@ declarations for all exported symbols.
       (display-version))
      (else
       (match args
-        ((lib . syms)
+        ((lib)
          (call-with-error-handling
           (lambda ()
-            (for-each pretty-print (dlgrovel lib syms)))
+            (for-each (lambda (x)
+                        (pretty-print x #:width 120))
+                      (dldump lib)))
           #:on-error (cond
                       ((option-ref options 'debug #f) 'debug)
                       (else 'report))
