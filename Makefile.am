@@ -28,4 +28,4 @@ TESTS = 					\
 	tests/basic.test
 TESTS_ENVIRONMENT = $(abs_top_builddir)/env $(GUILE) --no-auto-compile
 
-EXTRA_DIST = $(SOURCES) $(NOCOMP_SOURCES) $(TESTS)
+EXTRA_DIST = $(SOURCES) $(NOCOMP_SOURCES) $(TESTS) dlgrovel

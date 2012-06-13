@@ -1,0 +1,100 @@
+#!/usr/bin/env guile
+-*- scheme -*-
+!#
+;; dlgrovel
+;; Copyright (C) 2012 Andy Wingo <wingo@igalia.com>
+
+;; This library is free software; you can redistribute it and/or modify
+;; it under the terms of the GNU Lesser General Public License as
+;; published by the Free Software Foundation; either version 3 of the
+;; License, or (at your option) any later version.
+;;                                                                  
+;; This library is distributed in the hope that it will be useful, but
+;; WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+;; Lesser General Public License for more details.
+;;                                                                  
+;; You should have received a copy of the GNU Lesser General Public
+;; License along with this program; if not, contact:
+;;
+;; Free Software Foundation           Voice:  +1-617-542-5942
+;; 59 Temple Place - Suite 330        Fax:    +1-617-542-2652
+;; Boston, MA  02111-1307,  USA       gnu@gnu.org
+
+(define-module (dlgrovel)
+  #:use-module (ice-9 getopt-long)
+  #:use-module (ice-9 command-line)
+  #:use-module (ice-9 match)
+  #:use-module (ice-9 pretty-print)
+  #:use-module (ice-9 format)
+  #:use-module (ice-9 binary-ports)
+  #:use-module (system repl error-handling)
+  #:use-module (dlhacks)
+  #:use-module (dlhacks elf)
+  #:use-module (dlhacks dwarf))
+
+(define *option-grammar*
+  '((help (single-char #\h))
+    (version (single-char #\v))
+    (debug)))
+
+(define (display-version)
+  (version-etc "dlgrovel"
+               "0.1.0"
+               #:copyright-holder "Andy Wingo <wingo@igalia.com>"
+               #:command-name "dlgrovel"
+               #:license *LGPLv3+*))
+
+(define* (display-usage #:optional (port (current-output-port)))
+  (format port "Usage: dlgrovel [--help] [--version] LIB.SO\n"))
+
+(define (help args)
+  (display-usage))
+
+(define (load-elf file)
+  (parse-elf (call-with-input-file file get-bytevector-all)))
+
+(define (dlgrovel lib)
+  (let* ((abspath (if (member "so" (string-split lib #\.))
+                      lib
+                      (or (find-library lib)
+                          (error "Failed to find library" lib))))
+         (so (load-elf abspath))
+         (syms (extract-exported-symbols so))
+         (dbg-so (let ((dbg-path
+                        (or (find-debug-object abspath)
+                            (error "No debugging symbols for library" lib))))
+                   (if (equal? dbg-path abspath)
+                       so
+                       (load-elf dbg-path))))
+         (dbg-ctx (elf->dwarf-context dbg-so 0 0))
+         (debuginfo (read-debuginfo dbg-ctx)))
+    (extract-definitions (map elf-symbol-name syms)
+                         debuginfo)))
+
+(define (main args)
+  (setlocale LC_ALL "")
+  (let* ((options (getopt-long args *option-grammar*
+                               #:stop-at-first-non-option #t))
+         (args (option-ref options '() '())))
+    (cond
+     ((option-ref options 'help #f)
+      (help args))
+     ((option-ref options 'version #f)
+      (display-version))
+     (else
+      (match args
+        ((lib)
+         (call-with-error-handling
+          (lambda ()
+            (for-each pretty-print (dlgrovel lib)))
+          #:on-error (cond
+                      ((option-ref options 'debug #f) 'debug)
+                      (else 'report))
+          #:post-error (lambda args (exit 1))))
+        (else
+         (display-usage (current-error-port))
+         (exit 1)))))
+    (exit 0)))
+
+(main (program-arguments))
