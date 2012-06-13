@@ -1,4 +1,4 @@
-;; Guile-Dwarfutils
+;; guile-dlhacks
 ;; Copyright (C) 2012 Andy Wingo <wingo at pobox dot com>
 
 ;; This library is free software; you can redistribute it and/or modify
@@ -32,13 +32,20 @@
   #:use-module (ice-9 match)
   #:use-module (ice-9 rdelim)
   #:use-module (ice-9 regex)
+  #:use-module (ice-9 binary-ports)
+  #:use-module (ice-9 vlist)
   #:use-module ((ice-9 i18n) #:select (string-locale<?))
   #:use-module (rnrs bytevectors)
-  #:use-module (srfi srfi-1)
+  #:use-module ((srfi srfi-1) #:hide (list-index))
+  #:use-module (srfi srfi-11)
   #:use-module (srfi srfi-26)
-  #:export (system-library-search-path
+  #:export (global-debug-path
+            system-library-search-path
             find-library
-            ))
+            find-debug-object))
+
+(define global-debug-path
+  (make-parameter "/usr/lib/debug"))
 
 (define (scandir path selector)
   (let ((dir (opendir path)))
@@ -196,3 +203,185 @@
                                 (and v (> v (so-version candidate))))
                             (car in)
                             candidate)))))))))
+
+(define (extract-exported-symbols elf)
+  (let ((strs (assoc-ref (elf-sections-by-name elf) ".dynstr"))
+        (syms (assoc-ref (elf-sections-by-name elf) ".dynsym")))
+    (unless (and strs (= (elf-section-type strs) SHT_STRTAB))
+      (error "ELF object has no dynamic string table"))
+    (unless (and syms (= (elf-section-type syms) SHT_DYNSYM))
+      (error "ELF object has no dynamic symbol table"))
+    (let ((len (floor/ (elf-section-size syms) (elf-section-entsize syms))))
+      (let lp ((n 0) (out '()))
+        (if (< n len)
+            (let ((sym (elf-symbol-table-ref elf syms n strs)))
+              (lp (1+ n)
+                  (if (and (equal? (elf-symbol-visibility sym) STV_DEFAULT)
+                           (not (zero? (elf-symbol-value sym)))
+                           ;; No debugging information on these.
+                           (not (member (elf-symbol-name sym) '("_init" "_fini")))
+                           (or (equal? (elf-symbol-type sym) STT_OBJECT)
+                               (equal? (elf-symbol-type sym) STT_FUNC))
+                           (or (equal? (elf-symbol-binding sym) STB_GLOBAL)
+                               (equal? (elf-symbol-binding sym) STB_WEAK)))
+                      (cons sym out)
+                      out)))
+            (reverse out))))))
+
+(define (read-debuglink bv offset size byte-order)
+  (define (align4 address)
+    (+ address (modulo (- 4 (modulo address 4)) 4)))
+  (let lp ((end offset))
+    (if (zero? (bytevector-u8-ref bv end))
+        (let* ((len (- end offset))
+               (out (make-bytevector len)))
+          (bytevector-copy! bv offset out 0 (- end offset))
+          (let ((pos (align4 (1+ end))))
+            (unless (<= (+ len 5) size)
+              (error "bad debuglink" out))
+            (values (utf8->string out)
+                    (bytevector-u32-ref bv pos byte-order))))
+        (lp (1+ end)))))
+
+(define (search-debug-dirs basename dirname)
+  (let ((path (string-append (global-debug-path) dirname "/" basename)))
+    (and (file-exists? path)
+         (has-elf-magic? path)
+         path)))
+
+(define (find-debug-object library)
+  (let* ((bv (call-with-input-file library get-bytevector-all))
+         (elf (parse-elf bv))
+         (sections (elf-sections-by-name elf)))
+    (cond
+     ((assoc-ref sections ".debug_info")
+      library)
+     ((assoc-ref sections ".gnu_debuglink")
+      => (lambda (section)
+           (let-values (((basename crc)
+                         (read-debuglink bv (elf-section-offset section)
+                                         (elf-section-size section)
+                                         (elf-byte-order elf))))
+             (search-debug-dirs basename (dirname library)))))
+     (else #f))))
+
+(define* (die-ref die attr #:optional default)
+  (cond
+   ((list-index (die-attrs die) attr)
+    => (cut list-ref (die-vals die) <>))
+   (else default)))
+
+(define (extract-declaration die resolve-die intern-type)
+  (define (recur* die)
+    (extract-declaration die resolve-die intern-type))
+  (define (recur die)
+    (case (die-tag die)
+      ((typedef)
+       (intern-type die))
+      ((structure-type union-type enumeration-type class-type)
+       (let ((name (die-ref die 'name)))
+         (if (and name (not (die-ref die 'declaration)))
+             (intern-type die)
+             (recur* die))))
+      (else
+       (recur* die))))
+  (define (visit-type offset)
+    (recur (resolve-die offset)))
+  (define (visit-attr attr val tail)
+    (case attr
+      ((decl-file decl-line sibling low-pc high-pc frame-base external
+        location)
+       tail)
+      (else
+       (cons (list attr (case attr
+                          ((type) (visit-type val))
+                          (else val)))
+             tail))))
+  (define (has-tag? tag)
+    (lambda (x) (eq? (die-tag x) tag)))
+
+  (let ((tag (die-tag die))
+        (kids (die-children die)))
+    (cons tag
+          (fold-right
+           visit-attr
+           (case tag
+             ((subprogram subroutine-type)
+              (let ((formals (map recur
+                                  (filter (has-tag? 'formal-parameter)
+                                          kids)))
+                    (varargs (find (has-tag? 'unspecified-parameters)
+                                   kids)))
+                (list
+                 (cons 'args
+                       (if varargs
+                           (append formals (list recur varargs))
+                           formals)))))
+             ((structure-type union-type class-type)
+              (if (die-ref die 'declaration)
+                  '()
+                  (list (cons 'members (map recur kids)))))
+             ((enumeration-type)
+              (list (cons 'literals (map recur kids))))
+             (else
+              (unless (null? kids)
+                (error "unexpected children" die))
+              '()))
+           (die-attrs die) (die-vals die)))))
+
+(define (type-name die)
+  (list (case (die-tag die)
+          ((structure-type) 'struct)
+          ((union-type) 'union)
+          ((class-type) 'class)
+          ((typedef) 'typedef)
+          ((enumeration-type) 'enum)
+          (else (error "Don't know how to name" die)))
+        (or (die-ref die 'name)
+            (error "anonymous type should not get here"))))
+
+(define (find-definitions symbols debuginfo)
+  (let ((by-offset (make-hash-table))
+        (externs (make-hash-table))
+        (types-by-die (make-hash-table))
+        (types-by-name vlist-null))
+    (define (resolve-die offset)
+      (or (hashv-ref by-offset offset)
+          (error "unknown offset")))
+    (define (intern-type die)
+      (or (hashq-ref types-by-die die)
+          (let* ((name (type-name die))
+                 (decl (extract-declaration die resolve-die intern-type)))
+            (cond
+             ((vhash-assoc name types-by-name)
+              => (lambda (pair)
+                   (let ((name* (car pair))
+                         (decl* (cdr pair)))
+                     (unless (equal? decl decl*)
+                       (error "two types with the same name but different decls"
+                              decl decl*))
+                     name*)))
+             (else
+              (set! types-by-name (vhash-cons name decl types-by-name))
+              (hashq-set! types-by-die die name)
+              name)))))
+    (define (intern-die die)
+      (hashv-set! by-offset (die-offset die) die)
+      (when (die-ref die 'external)
+        (let ((name (die-ref die 'name)))
+          (when name
+            (hash-set! externs name die))))
+      (for-each intern-die (die-children die)))
+    (for-each intern-die debuginfo)
+    (let ((tail (map (lambda (s)
+                       (let* ((name (elf-symbol-name s))
+                              (die (hash-ref externs name)))
+                         (unless die
+                           (error "No debugging information for symbol" name))
+                         (extract-declaration die resolve-die intern-type)))
+                     symbols)))
+      (append (vhash-fold (lambda (name decl tail)
+                            (cons decl tail))
+                          '()
+                          types-by-name)
+              tail))))
