@@ -40,6 +40,7 @@
   #:use-module (srfi srfi-11)
   #:use-module (srfi srfi-26)
   #:export (global-debug-path
+            ld-so-conf
             system-library-search-path
             find-library
             find-debug-object
@@ -48,6 +49,9 @@
 
 (define global-debug-path
   (make-parameter "/usr/lib/debug"))
+
+(define ld-so-conf
+  (make-parameter "/etc/ld.so.conf"))
 
 (define (scandir path selector)
   (let ((dir (opendir path)))
@@ -151,8 +155,15 @@
                   (error "invalid syntax" s))))))))))
 
 (define system-library-search-path
-  (let ((p (delay (load-conf "/etc/ld.so.conf"))))
-    (lambda () (force p))))
+  (lambda ()
+    (append
+     (cond ((getenv "LD_LIBRARY_PATH")
+            => (lambda (path)
+                 (filter (lambda (x)
+                           (false-if-exception (file-is-directory? x)))
+                         (string-split path #\:))))
+           (else '()))
+     (load-conf (ld-so-conf)))))
 
 (define (find-library-candidates stem search-path extension)
   (append-map
