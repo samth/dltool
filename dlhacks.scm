@@ -161,6 +161,11 @@
                               (_ #f))))))
    search-path))
 
+(define (has-elf-magic? file)
+  (has-elf-header?
+   (call-with-input-file file
+     (lambda (f) (get-bytevector-n f 64)))))
+
 (define* (find-library stem #:key
                        (search-path (system-library-search-path))
                        (extension "so")
@@ -170,7 +175,9 @@
       (() #t) ; Unversioned.
       ((v . _) (string->number v))))
   
-  (let ((candidates (find-library-candidates stem search-path extension)))
+  (let ((candidates
+         (filter has-elf-magic?
+                 (find-library-candidates stem search-path extension))))
     (if version
         ;; Find a library with a particular version.
         (find (lambda (elt) (equal? (so-version elt) version))
