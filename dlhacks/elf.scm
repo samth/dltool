@@ -81,10 +81,15 @@
 
             STV_DEFAULT STV_INTERNAL STV_HIDDEN STV_PROTECTED
 
+            NT_GNU_ABI_TAG NT_GNU_HWCAP NT_GNU_BUILD_ID NT_GNU_GOLD_VERSION
+
             parse-elf
             elf-segment elf-segments
             elf-section elf-sections elf-sections-by-name
             elf-symbol-table-ref
+
+            parse-elf-note
+            elf-note-name elf-note-desc elf-note-type
 
             (make-string-table . make-elf-string-table)
             (string-table-intern . elf-string-table-intern)
@@ -868,6 +873,35 @@
 
 (define (elf-symbol-visibility sym)
   (logand (elf-symbol-other sym) #x3))
+
+(define NT_GNU_ABI_TAG 1)
+(define NT_GNU_HWCAP 2)
+(define NT_GNU_BUILD_ID 3)
+(define NT_GNU_GOLD_VERSION 4)
+
+(define-record-type <elf-note>
+  (make-elf-note name desc type)
+  elf-note?
+  (name elf-note-name)
+  (desc elf-note-desc)
+  (type elf-note-type))
+
+(define (parse-elf-note elf section)
+  (let ((bv (elf-bytes elf))
+        (byte-order (elf-byte-order elf))
+        (offset (elf-section-offset section)))
+    (unless (<= (+ offset 12) (bytevector-length bv))
+      (error "corrupt ELF (offset out of range)" offset))
+    (let ((namesz (bytevector-u32-ref bv offset byte-order))
+          (descsz (bytevector-u32-ref bv (+ offset 4) byte-order))
+          (type (bytevector-u32-ref bv (+ offset 8) byte-order)))
+      (unless (<= (+ offset 12 namesz descsz) (bytevector-length bv))
+        (error "corrupt ELF (offset out of range)" offset))
+      (let ((name (make-bytevector (1- namesz)))
+            (desc (make-bytevector descsz)))
+        (bytevector-copy! bv (+ offset 12) name 0 (1- namesz))
+        (bytevector-copy! bv (+ offset 12 namesz) desc 0 descsz)
+        (make-elf-note (utf8->string name) desc type)))))
 
 
 
