@@ -74,7 +74,8 @@ declarations for all exported symbols.
   (parse-elf (call-with-input-file file get-bytevector-all)))
 
 (define (all-exports lib-path)
-  (map elf-symbol-name (extract-exported-symbols (load-elf lib-path))))
+  (sort (map elf-symbol-name (extract-exported-symbols (load-elf lib-path)))
+        string<?))
 
 (define (load-debug lib-path)
   (let ((dbg (find-debug-object lib-path)))
