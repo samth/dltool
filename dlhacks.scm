@@ -165,9 +165,22 @@
            (else '()))
      (load-conf (ld-so-conf)))))
 
-(define (find-library-candidates stem search-path extension)
+(define (library-matcher stem extension)
   (let* ((head (string-append stem "." extension))
          (len (string-length head)))
+    ;; Returns #f if the library does not have the stem and extension.
+    ;; Otherwise returns the version as a number, or #t if there is no
+    ;; version.
+    (lambda (f)
+      (if (string= head f)
+          #t
+          (and (string-prefix? head f)
+               (let ((tail (substring f len)))
+                 (and (string-prefix? "." tail)
+                      (string->number (cadr (string-split tail #\.))))))))))
+
+(define (find-library-candidates stem search-path extension)
+  (let* ((matcher (library-matcher stem extension)))
     (append-map
      (lambda (path)
        (filter-map
@@ -175,27 +188,20 @@
           (let ((f (string-append path "/" base)))
             (and (not (file-is-directory? f))
                  f)))
-        (scandir path
-                 (lambda (f)
-                   (or (string= head f)
-                       (and (string= head f 0 len)
-                            (string-prefix? "." (substring f len))))))))
+        (scandir path matcher)))
      search-path)))
 
 (define (has-elf-magic? file)
-  (has-elf-header?
-   (call-with-input-file file
-     (lambda (f) (get-bytevector-n f 64)))))
+  (and (file-exists? file)
+       (has-elf-header?
+        (call-with-input-file file
+          (lambda (f) (get-bytevector-n f 64))))))
 
 (define* (find-library stem #:key
                        (search-path (system-library-search-path))
                        (extension "so")
                        version)
-  (define (so-version f)
-    (match (cddr (string-split (basename f) #\.))
-      (() #t) ; Unversioned.
-      ((v . _) (string->number v))))
-  
+  (define so-version (library-matcher stem extension))
   (let ((candidates
          (filter has-elf-magic?
                  (find-library-candidates stem search-path extension))))
@@ -259,25 +265,45 @@
 
 (define (search-debug-dirs basename dirname)
   (let ((path (string-append (global-debug-path) dirname "/" basename)))
-    (and (file-exists? path)
-         (has-elf-magic? path)
+    (and (has-elf-magic? path)
+         path)))
+
+(define (search-debug-by-build-id build-id)
+  (define (byte->hex-string byte)
+    (let ((s (number->string byte 16)))
+      (if (= (string-length s) 1)
+          (string-append "0" s)
+          s)))
+  (let* ((bytes (bytevector->u8-list build-id))
+         (path (string-concatenate
+                `(,(global-debug-path)
+                  "/.build-id/"
+                  ,(byte->hex-string (car bytes))
+                  "/"
+                  ,@(map byte->hex-string (cdr bytes))
+                  ".debug"))))
+    (and (has-elf-magic? path)
          path)))
 
 (define (find-debug-object library)
   (let* ((bv (call-with-input-file library get-bytevector-all))
          (elf (parse-elf bv))
          (sections (elf-sections-by-name elf)))
-    (cond
-     ((assoc-ref sections ".debug_info")
-      library)
-     ((assoc-ref sections ".gnu_debuglink")
-      => (lambda (section)
-           (let-values (((basename crc)
-                         (read-debuglink bv (elf-section-offset section)
-                                         (elf-section-size section)
-                                         (elf-byte-order elf))))
-             (search-debug-dirs basename (dirname library)))))
-     (else #f))))
+    (or (and (assoc-ref sections ".debug_info")
+             library)
+        (and=> (assoc-ref sections ".note.gnu.build-id")
+               (lambda (section)
+                 (let ((note (parse-elf-note elf section)))
+                   (and (equal? (elf-note-name note) "GNU")
+                        (= (elf-note-type note) NT_GNU_BUILD_ID)
+                        (search-debug-by-build-id (elf-note-desc note))))))
+        (and=> (assoc-ref sections ".gnu_debuglink")
+               (lambda (section)
+                 (let-values (((basename crc)
+                               (read-debuglink bv (elf-section-offset section)
+                                               (elf-section-size section)
+                                               (elf-byte-order elf))))
+                   (search-debug-dirs basename (dirname library))))))))
 
 (define* (die-ref die attr #:optional default)
   (cond
@@ -291,10 +317,13 @@
   (define (recur die)
     (case (die-tag die)
       ((typedef)
-       (intern-type die))
+       ;; Typedefs without types are declarations.
+       (if (die-ref die 'type)
+           (intern-type die)
+           (type-name die)))
       ((structure-type union-type enumeration-type class-type)
        (let ((name (die-ref die 'name)))
-         (if (and name (not (die-ref die 'declaration)))
+         (if name
              (intern-type die)
              (recur* die))))
       (else
@@ -316,36 +345,32 @@
 
   (let ((tag (die-tag die))
         (kids (die-children die)))
-    (cond
-     ((die-ref die 'declaration)
-      (type-name die))
-     (else
-      (cons tag
-            (fold-right
-             visit-attr
-             (case tag
-               ((subprogram subroutine-type)
-                (let ((formals (map recur
-                                    (filter (has-tag? 'formal-parameter)
-                                            kids)))
-                      (varargs (find (has-tag? 'unspecified-parameters)
-                                     kids)))
-                  (list
-                   (cons 'args
-                         (if varargs
-                             (append formals (list recur varargs))
-                             formals)))))
-               ((structure-type union-type class-type)
-                (list (cons 'members (map recur kids))))
-               ((enumeration-type)
-                (list (cons 'literals (map recur kids))))
-               ((array-type)
-                (map recur kids))
-               (else
-                (unless (null? kids)
-                  (error "unexpected children" die))
-                '()))
-             (die-attrs die) (die-vals die)))))))
+    (cons tag
+          (fold-right
+           visit-attr
+           (case tag
+             ((subprogram subroutine-type)
+              (let ((formals (map recur
+                                  (filter (has-tag? 'formal-parameter)
+                                          kids)))
+                    (varargs (find (has-tag? 'unspecified-parameters)
+                                   kids)))
+                (list
+                 (cons 'args
+                       (if varargs
+                           (append formals (list (recur varargs)))
+                           formals)))))
+             ((structure-type union-type class-type)
+              (list (cons 'members (map recur kids))))
+             ((enumeration-type)
+              (list (cons 'literals (map recur kids))))
+             ((array-type)
+              (map recur kids))
+             (else
+              (unless (null? kids)
+                (error "unexpected children" die))
+              '()))
+           (die-attrs die) (die-vals die)))))
 
 (define (type-name die)
   (list (case (die-tag die)
@@ -370,15 +395,16 @@
       (or (hashq-ref types-by-die die)
           (let* ((name (type-name die)))
             (hashq-set! types-by-die die name)
-            (let ((decl (extract-declaration die resolve-die intern-type)))
-              (match (vhash-assoc name types-by-name)
-                ((name* . decl*)
-                 (unless (equal? decl decl*)
-                   (error "two types with the same name but different decls"
-                          decl decl*)))
-                (#f
-                 (set! types-by-name (vhash-cons name decl types-by-name))))
-              name))))
+            (unless (die-ref die 'declaration)
+              (let ((decl (extract-declaration die resolve-die intern-type)))
+                (match (vhash-assoc name types-by-name)
+                  ((name* . decl*)
+                   (unless (equal? decl decl*)
+                     (error "two types with the same name but different decls"
+                            decl decl*)))
+                  (#f
+                   (set! types-by-name (vhash-cons name decl types-by-name))))))
+            name)))
     (define (intern-die die)
       (hashv-set! by-offset (die-offset die) die)
       (when (die-ref die 'external)
@@ -391,14 +417,22 @@
               (hash-set! externs name die)))))
       (for-each intern-die (die-children die)))
     (for-each intern-die debuginfo)
-    (let ((tail (map (lambda (name)
-                       (let ((die (hash-ref externs name)))
-                         (unless die
-                           (error "No debugging information for symbol" name))
-                         (extract-declaration die resolve-die intern-type)))
-                     names)))
-      (append (vhash-fold (lambda (name decl tail)
-                            (cons decl tail))
-                          '()
-                          types-by-name)
-              tail))))
+    (let lp ((names names) (out '()))
+      (match names
+        ((name . names)
+         (cond
+          ((hash-ref externs name)
+           => (lambda (die)
+                (lp names
+                    (cons (extract-declaration die resolve-die intern-type)
+                          out))))
+          (else
+           (format (current-error-port)
+                   "warning: no debug information for symbol: ~a\n"
+                   name)
+           (lp names out))))
+        (()
+         (vhash-fold (lambda (name decl tail)
+                       (cons decl tail))
+                     (reverse out)
+                     types-by-name))))))
