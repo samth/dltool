@@ -600,14 +600,19 @@
   (+ pos (ctx-word-size ctx)))
 
 (define (%read-uleb128 bv pos)
-  (let lp ((n 0) (pos pos) (shift 0))
-    (let ((b (bytevector-u8-ref bv pos)))
-      (if (zero? (logand b #x80))
-          (values (logior (ash b shift) n)
-                  (1+ pos))
-          (lp (logior (ash (logxor #x80 b) shift) n)
-              (1+ pos)
-              (+ shift 7))))))
+  ;; Unrolled by one.
+  (let ((b (bytevector-u8-ref bv pos)))
+    (if (zero? (logand b #x80))
+        (values b
+                (1+ pos))
+        (let lp ((n (logxor #x80 b)) (pos (1+ pos)) (shift 7))
+          (let ((b (bytevector-u8-ref bv pos)))
+            (if (zero? (logand b #x80))
+                (values (logior (ash b shift) n)
+                        (1+ pos))
+                (lp (logior (ash (logxor #x80 b) shift) n)
+                    (1+ pos)
+                    (+ shift 7))))))))
 
 (define (%read-sleb128 bv pos)
   (let lp ((n 0) (pos pos) (shift 0))
