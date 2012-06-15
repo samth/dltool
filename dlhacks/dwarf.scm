@@ -41,7 +41,7 @@
             abbrev? abbrev-tag abbrev-attrs abbrev-forms
 
             die? die-offset die-abbrev die-vals die-children
-            die-tag die-attrs die-forms))
+            die-tag die-attrs die-forms die-ref))
 
 ;;;
 ;;; First, define a number of constants.  The figures numbers refer to
@@ -876,6 +876,12 @@
 
 (define (die-forms die)
   (abbrev-forms (die-abbrev die)))
+
+(define* (die-ref die attr #:optional default)
+  (cond
+   ((list-index (die-attrs die) attr)
+    => (lambda (n) (list-ref (die-vals die) n)))
+   (else default)))
 
 (define (read-die ctx pos av)
   (let ((offset pos))

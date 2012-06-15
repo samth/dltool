@@ -36,7 +36,7 @@
   #:use-module (ice-9 vlist)
   #:use-module ((ice-9 i18n) #:select (string-locale<?))
   #:use-module (rnrs bytevectors)
-  #:use-module ((srfi srfi-1) #:hide (list-index))
+  #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-11)
   #:use-module (srfi srfi-26)
   #:export (global-debug-path
@@ -305,12 +305,6 @@
                                                (elf-byte-order elf))))
                    (search-debug-dirs basename (dirname library))))))))
 
-(define* (die-ref die attr #:optional default)
-  (cond
-   ((list-index (die-attrs die) attr)
-    => (cut list-ref (die-vals die) <>))
-   (else default)))
-
 (define (extract-declaration die resolve-die intern-type)
   (define (recur* die)
     (extract-declaration die resolve-die intern-type))
@@ -335,11 +329,10 @@
       ((decl-file decl-line sibling low-pc high-pc frame-base external
         location)
        tail)
+      ((type)
+       (cons (list attr (visit-type val)) tail))
       (else
-       (cons (list attr (case attr
-                          ((type) (visit-type val))
-                          (else val)))
-             tail))))
+       (cons (list attr val) tail))))
   (define (has-tag? tag)
     (lambda (x) (eq? (die-tag x) tag)))
 
