@@ -65,21 +65,21 @@
   (define-command ((name (option param ...) ...) options . args)
     docstring
     code code* ...)
-  (begin
-    (define name
-      (case-lambda*
-       ((options . args)
-        code code* ...)
-       ((options . unrecognized)
-        (format (current-error-port) "Unexpected arguments: ~a\n"
-                unrecognized)
-        (format (current-error-port) "Usage: dlhacks ~a\n"
-                (car (string-split docstring #\newline)))
-        (exit 1))))
-    (set! *commands*
-          (cons (make-command (symbol->string 'name)
-                              '((option param ...) ...) docstring name)
-                *commands*))))
+  (set! *commands*
+        (cons (make-command
+               (symbol->string 'name)
+               '((option param ...) ...)
+               docstring
+               (case-lambda*
+                ((options . args)
+                 code code* ...)
+                ((options . unrecognized)
+                 (format (current-error-port) "Unexpected arguments: ~a\n"
+                         unrecognized)
+                 (format (current-error-port) "Usage: dlhacks ~a\n"
+                         (car (string-split docstring #\newline)))
+                 (exit 1))))
+              *commands*)))
 
 (define (unrecognized-command name)
   (with-output-to-port (current-error-port)
@@ -186,26 +186,64 @@ It's a bit much, but it's useful for debugging.
                 (error "Failed to find library" lib))
               (debuginfo->tree (load-debug lib-path)))))
 
-(define-command ((typedef (deep)) options lib name)
-  "typedef [--deep] LIB NAME
-Print the definition of a typedef.
+(define-command ((define (deep)) options lib name #:optional tag)
+  "define [--deep] LIB NAME [KIND]
+Print the definition of a symbol.
+
+Note that there are two different identifier namespaces in C and C++:
+the namespace of \"tagged types\" (structs, classes, unions and enums),
+and another namespace for the rest of things, including functions and
+variables, but also typedefs.
+
+This command will simply return the first definition that it sees with
+the given name.  If you want to specify that it be of a particular type,
+then give the type as an additional argument.  Available types are
+derived from the DWARF specification, and include enumeration-type,
+structure-type, typedef, subprogram, union-type, etc.  See the DWARF
+standard for full details (stripping the initial DW_TAG_ prefix, and
+converting underscores to dashes).
+
+Finally, we should note that each separate compilation unit effectively
+instantiates a new type tree.  Some of those types will be shared with
+other compilation units, but it is always possible to define a type
+local to a compilation unit (e.g. inside the C file).  So do check the
+result to ensure its sanity.
 "
-  (let* ((lib-path (if (string-index lib #\/)
-                       lib
-                       (find-library lib))))
+  (let ((lib-path (if (string-index lib #\/)
+                      lib
+                      (find-library lib)))
+        (tag (and=> tag string->symbol)))
     (unless lib-path
       (error "Failed to find library" lib))
     (let* ((debuginfo (load-debug lib-path))
            (type (extract-one-definition
                   debuginfo
                   (lambda (die)
-                    (and (equal? (die-tag die) 'typedef)
+                    (and (or (not tag)
+                             (eq? (die-tag die) tag))
                          (equal? (die-ref die 'name) name)
-                         (die-ref die 'type)))
+                         (if (eq? (die-tag die) 'typedef)
+                             (die-ref die 'type)
+                             (not (die-ref die 'declaration)))))
                   (option-ref options 'deep #f))))
       (unless type
-        (error "Failed to find typedef in library" lib name))
+        (error "Failed to find ~a in library" (or tag "definition")
+               lib name))
       (pretty-print type))))
+
+(define (dispatch-command command args debug?)
+  (let ((c (find-command command)))
+    (unless c
+      (unrecognized-command command))
+    (let* ((options (getopt-long (cons command args)
+                                 (command-grammar c)
+                                 #:stop-at-first-non-option #t))
+           (args (option-ref options '() '())))
+      (call-with-error-handling
+       (lambda ()
+         (apply (command-handler c) options args))
+       #:on-error (if debug? 'debug 'report)
+       #:post-error (lambda args (exit 1))))))
 
 (define (main args)
   (setlocale LC_ALL "")
@@ -215,24 +253,13 @@ Print the definition of a typedef.
          (debug? (option-ref options 'debug #f)))
     (cond
      ((option-ref options 'help #f)
-      (apply help options args))
+      (dispatch-command "help" '() debug?))
      ((option-ref options 'version #f)
       (display-version))
      (else
       (match args
         ((command . args)
-         (let ((c (find-command command)))
-           (unless c
-             (unrecognized-command command))
-           (let* ((options (getopt-long (cons command args)
-                                        (command-grammar c)
-                                        #:stop-at-first-non-option #t))
-                  (args (option-ref options '() '())))
-             (call-with-error-handling
-              (lambda ()
-                (apply (command-handler c) options args))
-              #:on-error (if debug? 'debug 'report)
-              #:post-error (lambda args (exit 1))))))
+         (dispatch-command command args debug?))
         (else
          (display-usage (current-error-port))
          (exit 1)))))
