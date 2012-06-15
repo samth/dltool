@@ -459,7 +459,7 @@
                  (die-children head)
                  rest))))))))
 
-(define* (extract-one-definition debuginfo pred #:optional deep?)
+(define* (extract-one-definition debuginfo pred #:optional (depth 1))
   (define* (visit-die x seen)
     (define (recur y)
       (visit-die y (cons x seen)))
@@ -475,14 +475,13 @@
          (cons (list attr (visit-type val)) tail))
         (else
          (cons (list attr val) tail))))
-    (if (and (or (not deep?)
+    (if (and (or (< depth (length seen))
                  (find (lambda (y) (equal? (die-offset y) (die-offset x)))
                        seen))
              (memq (die-tag x)
                    '(structure-type union-type class-type typedef
                                     enumeration-type))
-             (die-ref x 'name)
-             (or-map (cut die-ref <> 'byte-size) seen))
+             (die-ref x 'name))
         (type-name x)
         (cons (die-tag x)
               (fold visit-attr

@@ -186,8 +186,8 @@ It's a bit much, but it's useful for debugging.
                 (error "Failed to find library" lib))
               (debuginfo->tree (load-debug lib-path)))))
 
-(define-command ((define (deep)) options lib name #:optional tag)
-  "define [--deep] LIB NAME [KIND]
+(define-command ((define (depth (value #t))) options lib name #:optional tag)
+  "define [--depth=N] LIB NAME [KIND]
 Print the definition of a symbol.
 
 Note that there are two different identifier namespaces in C and C++:
@@ -225,7 +225,9 @@ result to ensure its sanity.
                          (if (eq? (die-tag die) 'typedef)
                              (die-ref die 'type)
                              (not (die-ref die 'declaration)))))
-                  (option-ref options 'deep #f))))
+                  (let ((d (option-ref options 'depth "1")))
+                    (or (string->number d)
+                        (error "Bad depth (expected a number)" d))))))
       (unless type
         (format (current-error-port)
                 "ERROR: Failed to find ~a in library ~a: ~a\n"
