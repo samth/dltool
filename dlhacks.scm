@@ -340,7 +340,7 @@
   (let ((tag (die-tag die))
         (kids (die-children die)))
     (cons tag
-          (fold-right
+          (fold
            visit-attr
            (case tag
              ((subprogram subroutine-type)
@@ -364,7 +364,8 @@
               (unless (null? kids)
                 (error "unexpected children" die))
               '()))
-           (die-attrs die) (die-vals die)))))
+           (reverse (die-attrs die))
+           (reverse (die-vals die))))))
 
 (define (type-name die)
   (list (case (die-tag die)
@@ -474,17 +475,18 @@
          (cons (list attr (visit-type val)) tail))
         (else
          (cons (list attr val) tail))))
-    (if (or (find (lambda (y) (equal? (die-offset y) (die-offset x)))
-                  seen)
-            (and (not deep?)
-                 (memq (die-tag x)
-                       '(structure-type union-type class-type typedef
-                                        enumeration-type))
-                 (die-ref x 'name)
-                 (or-map (cut die-ref <> 'byte-size) seen)))
+    (if (and (or (not deep?)
+                 (find (lambda (y) (equal? (die-offset y) (die-offset x)))
+                       seen))
+             (memq (die-tag x)
+                   '(structure-type union-type class-type typedef
+                                    enumeration-type))
+             (die-ref x 'name)
+             (or-map (cut die-ref <> 'byte-size) seen))
         (type-name x)
         (cons (die-tag x)
-              (fold-right visit-attr
-                          (map recur (die-children x))
-                          (die-attrs x) (die-vals x)))))
+              (fold visit-attr
+                    (map recur (die-children x))
+                    (reverse (die-attrs x))
+                    (reverse (die-vals x))))))
   (and=> (find-die debuginfo pred) (cut visit-die <> '())))
