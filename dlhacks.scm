@@ -45,7 +45,8 @@
             find-library
             find-debug-object
             extract-exported-symbols
-            extract-definitions))
+            extract-definitions
+            extract-one-definition))
 
 (define global-debug-path
   (make-parameter "/usr/lib/debug"))
@@ -429,3 +430,61 @@
                        (cons decl tail))
                      (reverse out)
                      types-by-name))))))
+
+(define (find-die debuginfo pred)
+  ;; Breadth-first search.
+  (let lp ((in debuginfo) (kids '()))
+    (match in
+      ((head . in)
+       (if (pred head)
+           head
+           (lp in (cons (die-children head) kids))))
+      (()
+       (if (null? kids)
+           #f
+           (lp (concatenate (reverse kids)) '()))))))
+
+(define (find-die-by-offset debuginfo offset)
+  (let lp ((die-list debuginfo))
+    (match die-list
+      (() #f)
+      ((head . rest)
+       (cond
+        ((= offset (die-offset head)) head)
+        ((< offset (die-offset head)) #f)
+        (else
+         (lp (if (or (null? rest)
+                     (< offset (die-offset (car rest))))
+                 (die-children head)
+                 rest))))))))
+
+(define* (extract-one-definition debuginfo pred #:optional deep?)
+  (define* (visit-die x seen)
+    (define (recur y)
+      (visit-die y (cons x seen)))
+    (define (visit-type offset)
+      (recur (or (find-die-by-offset debuginfo offset)
+                 (error "what!"))))
+    (define (visit-attr attr val tail)
+      (case attr
+        ((decl-file decl-line sibling low-pc high-pc frame-base
+                    external location)
+         tail)
+        ((type)
+         (cons (list attr (visit-type val)) tail))
+        (else
+         (cons (list attr val) tail))))
+    (if (or (find (lambda (y) (equal? (die-offset y) (die-offset x)))
+                  seen)
+            (and (not deep?)
+                 (memq (die-tag x)
+                       '(structure-type union-type class-type typedef
+                                        enumeration-type))
+                 (die-ref x 'name)
+                 (or-map (cut die-ref <> 'byte-size) seen)))
+        (type-name x)
+        (cons (die-tag x)
+              (fold-right visit-attr
+                          (map recur (die-children x))
+                          (die-attrs x) (die-vals x)))))
+  (and=> (find-die debuginfo pred) (cut visit-die <> '())))

@@ -186,6 +186,27 @@ It's a bit much, but it's useful for debugging.
                 (error "Failed to find library" lib))
               (debuginfo->tree (load-debug lib-path)))))
 
+(define-command ((typedef (deep)) options lib name)
+  "typedef [--deep] LIB NAME
+Print the definition of a typedef.
+"
+  (let* ((lib-path (if (string-index lib #\/)
+                       lib
+                       (find-library lib))))
+    (unless lib-path
+      (error "Failed to find library" lib))
+    (let* ((debuginfo (load-debug lib-path))
+           (type (extract-one-definition
+                  debuginfo
+                  (lambda (die)
+                    (and (equal? (die-tag die) 'typedef)
+                         (equal? (die-ref die 'name) name)
+                         (die-ref die 'type)))
+                  (option-ref options 'deep #f))))
+      (unless type
+        (error "Failed to find typedef in library" lib name))
+      (pretty-print type))))
+
 (define (main args)
   (setlocale LC_ALL "")
   (let* ((options (getopt-long args *common-options*
