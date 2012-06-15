@@ -543,6 +543,7 @@
                       info-start info-end
                       abbrevs-start abbrevs-end
                       strtab-start strtab-end
+                      loc-start loc-end
                       word-size endianness)
   dwarf-context?
   (bv ctx-bv)
@@ -554,6 +555,8 @@
   (abbrevs-end ctx-abbrevs-end)
   (strtab-start ctx-strtab-start)
   (strtab-end ctx-strtab-end)
+  (loc-start ctx-loc-start)
+  (loc-end ctx-loc-end)
   (word-size ctx-word-size)
   (endianness ctx-endianness))
 
@@ -764,6 +767,17 @@
        (error "unrecognized form" form))
    ctx pos))
 
+(define (parse-location-list ctx offset)
+  (let lp ((pos (+ (ctx-loc-start ctx) offset))
+           (out '()))
+    (let*-values (((start pos) (read-addr ctx pos))
+                  ((end pos) (read-addr ctx pos)))
+      (if (and (zero? start) (zero? end))
+          (reverse out)
+          (let*-values (((len pos) (read-u16 ctx pos))
+                        ((block pos) (read-block ctx pos len)))
+            (lp pos (cons (list start end (parse-location block)) out)))))))
+
 (define (parse-location loc)
   (cond
    ((bytevector? loc)
@@ -819,7 +833,8 @@
                      ;; up
                      loc
                      (lp (1+ pos) (cons (list op) out))))))))))
-   (else loc)))
+   (else
+    (parse-location-list (current-context) loc))))
 
 (define-syntax-rule (define-attribute-parsers parse (name parser) ...)
   (define parse
@@ -920,7 +935,8 @@
   (let* ((sections (elf-sections-by-name elf))
          (info (assoc-ref sections ".debug_info"))
          (abbrevs (assoc-ref sections ".debug_abbrev"))
-         (strtab (assoc-ref sections ".debug_str")))
+         (strtab (assoc-ref sections ".debug_str"))
+         (loc (assoc-ref sections ".debug_loc")))
     (make-dwarf-context (elf-bytes elf) vaddr memsz
                         (elf-section-offset info)
                         (+ (elf-section-offset info)
@@ -931,6 +947,9 @@
                         (elf-section-offset strtab)
                         (+ (elf-section-offset strtab)
                            (elf-section-size strtab))
+                        (elf-section-offset loc)
+                        (+ (elf-section-offset loc)
+                           (elf-section-size loc))
                         (elf-word-size elf)
                         (elf-byte-order elf))))
 
