@@ -558,6 +558,7 @@
   (endianness ctx-endianness))
 
 (define current-compilation-offset (make-parameter 0))
+(define current-context (make-parameter #f))
 
 ;;;
 ;;; Procedures for reading DWARF data.
@@ -585,9 +586,9 @@
     ((8) (read-u64 ctx pos))
     (else (error "unsupported word size" ctx))))
 
-(define (read-uleb128 ctx pos)
+(define (%read-uleb128 bv pos)
   (let lp ((n 0) (pos pos) (shift 0))
-    (let ((b (bytevector-u8-ref (ctx-bv ctx) pos)))
+    (let ((b (bytevector-u8-ref bv pos)))
       (if (zero? (logand b #x80))
           (values (logior (ash b shift) n)
                   (1+ pos))
@@ -595,9 +596,9 @@
               (1+ pos)
               (+ shift 7))))))
 
-(define (read-sleb128 ctx pos)
+(define (%read-sleb128 bv pos)
   (let lp ((n 0) (pos pos) (shift 0))
-    (let ((b (bytevector-u8-ref (ctx-bv ctx) pos)))
+    (let ((b (bytevector-u8-ref bv pos)))
       (if (zero? (logand b #x80))
           (values (logior (ash b shift) n
                           (if (zero? (logand #x40 b))
@@ -607,6 +608,12 @@
           (lp (logior (ash (logxor #x80 b) shift) n)
               (1+ pos)
               (+ shift 7))))))
+
+(define (read-uleb128 ctx pos)
+  (%read-uleb128 (ctx-bv ctx) pos))
+
+(define (read-sleb128 ctx pos)
+  (%read-sleb128 (ctx-bv ctx) pos))
 
 (define (read-block ctx pos len)
   (let ((bv (make-bytevector len)))
@@ -757,6 +764,63 @@
        (error "unrecognized form" form))
    ctx pos))
 
+(define (parse-location loc)
+  (cond
+   ((bytevector? loc)
+    (let ((len (bytevector-length loc))
+          (word-size (ctx-word-size (current-context)))
+          (endianness (ctx-endianness (current-context))))
+      (define (u8-ref pos) (bytevector-u8-ref loc pos))
+      (define (s8-ref pos) (bytevector-s8-ref loc pos))
+      (define (u16-ref pos) (bytevector-u16-ref loc pos endianness))
+      (define (s16-ref pos) (bytevector-s16-ref loc pos endianness))
+      (define (u32-ref pos) (bytevector-u32-ref loc pos endianness))
+      (define (s32-ref pos) (bytevector-s32-ref loc pos endianness))
+      (define (u64-ref pos) (bytevector-u64-ref loc pos endianness))
+      (define (s64-ref pos) (bytevector-s64-ref loc pos endianness))
+      (let lp ((pos 0) (out '()))
+        (if (= pos len)
+            (reverse out)
+            (let ((op (location-op->name (u8-ref pos))))
+              (case op
+                ((addr)
+                 (case word-size
+                   ((4) (lp (+ pos 5) (cons (list op (u32-ref (1+ pos))) out)))
+                   ((8) (lp (+ pos 9) (cons (list op (u64-ref (1+ pos))) out)))
+                   (else (error "what!"))))
+                ((const1u pick deref-size xderef-size)
+                 (lp (+ pos 2) (cons (list op (u8-ref (1+ pos))) out)))
+                ((const1s)
+                 (lp (+ pos 2) (cons (list op (s8-ref (1+ pos))) out)))
+                ((const2u)
+                 (lp (+ pos 3) (cons (list op (u16-ref (1+ pos))) out)))
+                ((const2s skip bra)
+                 (lp (+ pos 3) (cons (list op (s16-ref (1+ pos))) out)))
+                ((const4u)
+                 (lp (+ pos 5) (cons (list op (u32-ref (1+ pos))) out)))
+                ((const4s)
+                 (lp (+ pos 5) (cons (list op (s32-ref (1+ pos))) out)))
+                ((const8u)
+                 (lp (+ pos 9) (cons (list op (u64-ref (1+ pos))) out)))
+                ((const8s)
+                 (lp (+ pos 9) (cons (list op (s64-ref (1+ pos))) out)))
+                ((plus-uconst regx piece)
+                 (let-values (((val pos) (%read-uleb128 loc (1+ pos))))
+                   (lp pos (cons (list op val) out))))
+                ((breg0 breg1 breg2 breg3 breg4 breg5 breg6 breg7 breg8 breg9
+                        breg10 breg11 breg12 breg13 breg14 breg15 breg16 breg17
+                        breg18 breg19 breg20 breg21 breg22 breg23 breg24 breg25
+                        breg26 breg27 breg28 breg29 breg30 breg31 fbreg)
+                 (let-values (((val pos) (%read-sleb128 loc (1+ pos))))
+                   (lp pos (cons (list op val) out))))
+                (else
+                 (if (number? op)
+                     ;; We failed to parse this opcode; we have to give
+                     ;; up
+                     loc
+                     (lp (1+ pos) (cons (list op) out))))))))))
+   (else loc)))
+
 (define-syntax-rule (define-attribute-parsers parse (name parser) ...)
   (define parse
     (let ((parsers (make-hash-table)))
@@ -771,6 +835,8 @@
   (visibility visibility-code->name)
   (virtuality virtuality-code->name)
   (language language-code->name)
+  (location parse-location)
+  (data-member-location parse-location)
   (case-sensitive case-sensitivity-code->name)
   (calling-convention calling-convention-code->name)
   (inline inline-code->name)
@@ -841,13 +907,14 @@
       (read-die-tree ctx pos av))))
 
 (define (read-debuginfo ctx)
-  (let lp ((dies '()) (pos (ctx-info-start ctx)))
-    (if (< pos (ctx-info-end ctx))
-        (let-values (((die pos) (read-compilation-unit ctx pos)))
-          (if die
-              (lp (cons die dies) pos)
-              (reverse dies)))
-        (reverse dies))))
+  (parameterize ((current-context ctx))
+    (let lp ((dies '()) (pos (ctx-info-start ctx)))
+      (if (< pos (ctx-info-end ctx))
+          (let-values (((die pos) (read-compilation-unit ctx pos)))
+            (if die
+                (lp (cons die dies) pos)
+                (reverse dies)))
+          (reverse dies)))))
 
 (define (elf->dwarf-context elf vaddr memsz)
   (let* ((sections (elf-sections-by-name elf))
