@@ -570,24 +570,34 @@
 (define (read-u8 ctx pos)
   (values (bytevector-u8-ref (ctx-bv ctx) pos)
           (1+ pos)))
+(define (skip-8 ctx pos)
+  (+ pos 1))
 
 (define (read-u16 ctx pos)
   (values (bytevector-u16-ref (ctx-bv ctx) pos (ctx-endianness ctx))
           (+ pos 2)))
+(define (skip-16 ctx pos)
+  (+ pos 2))
 
 (define (read-u32 ctx pos)
   (values (bytevector-u32-ref (ctx-bv ctx) pos (ctx-endianness ctx))
           (+ pos 4)))
+(define (skip-32 ctx pos)
+  (+ pos 4))
 
 (define (read-u64 ctx pos)
   (values (bytevector-u64-ref (ctx-bv ctx) pos (ctx-endianness ctx))
           (+ pos 8)))
+(define (skip-64 ctx pos)
+  (+ pos 8))
 
 (define (read-addr ctx pos)
   (case (ctx-word-size ctx)
     ((4) (read-u32 ctx pos))
     ((8) (read-u64 ctx pos))
     (else (error "unsupported word size" ctx))))
+(define (skip-addr ctx pos)
+  (+ pos (ctx-word-size ctx)))
 
 (define (%read-uleb128 bv pos)
   (let lp ((n 0) (pos pos) (shift 0))
@@ -618,6 +628,14 @@
 (define (read-sleb128 ctx pos)
   (%read-sleb128 (ctx-bv ctx) pos))
 
+(define (skip-leb128 ctx pos)
+  (let ((bv (ctx-bv ctx)))
+    (let lp ((pos pos))
+      (let ((b (bytevector-u8-ref bv pos)))
+        (if (zero? (logand b #x80))
+            (1+ pos)
+            (lp (1+ pos)))))))
+
 (define (read-block ctx pos len)
   (let ((bv (make-bytevector len)))
     (bytevector-copy! (ctx-bv ctx) pos bv 0 len)
@@ -634,9 +652,17 @@
                     (1+ end)))
           (lp (1+ end))))))
 
+(define (skip-string ctx pos)
+  (let ((bv (ctx-bv ctx)))
+    (let lp ((end pos))
+      (if (zero? (bytevector-u8-ref bv end))
+          (1+ end)
+          (lp (1+ end))))))
+
 (define-record-type <abbrev>
-  (make-abbrev code tag has-children? attrs forms)
+  (make-abbrev ctx code tag has-children? attrs forms)
   abbrev?
+  (ctx abbrev-ctx)
   (code abbrev-code)
   (tag abbrev-tag)
   (has-children? abbrev-has-children?)
@@ -651,7 +677,8 @@
       (let*-values (((attr pos) (read-uleb128 ctx pos))
                     ((form pos) (read-uleb128 ctx pos)))
         (if (and (zero? attr) (zero? form))
-            (values (make-abbrev code
+            (values (make-abbrev ctx
+                                 code
                                  (tag-code->name tag)
                                  (eq? (children-code->name children) 'yes)
                                  (reverse attrs)
@@ -681,92 +708,135 @@
 ;; Values.
 ;;
 (define *readers* (make-hash-table))
+(define *scanners* (make-hash-table))
 (define-syntax define-value-reader
   (syntax-rules ()
-    ((_ (form ctx pos) code ...)
-     (define-value-reader form (lambda (ctx pos) code ...)))
-    ((_ form proc)
-     (hashq-set! *readers* 'form proc))))
+    ((_ form reader scanner)
+     (begin
+       (hashq-set! *readers* 'form reader)
+       (hashq-set! *scanners* 'form scanner)))))
 
-(define-value-reader addr read-addr)
+(define-value-reader addr read-addr skip-addr)
 
-(define-value-reader (block ctx pos)
-  (let-values (((len pos) (read-uleb128 ctx pos)))
-    (read-block ctx pos len)))
+(define-value-reader block
+  (lambda (ctx pos)
+    (let-values (((len pos) (read-uleb128 ctx pos)))
+      (read-block ctx pos len)))
+  (lambda (ctx pos)
+    (let-values (((len pos) (read-uleb128 ctx pos)))
+      (+ pos len))))
 
-(define-value-reader (block1 ctx pos)
-  (let-values (((len pos) (read-u8 ctx pos)))
-    (read-block ctx pos len)))
+(define-value-reader block1
+  (lambda (ctx pos)
+    (let-values (((len pos) (read-u8 ctx pos)))
+      (read-block ctx pos len)))
+  (lambda (ctx pos)
+    (+ pos 1 (bytevector-u8-ref (ctx-bv ctx) pos))))
 
-(define-value-reader (block2 ctx pos)
-  (let-values (((len pos) (read-u16 ctx pos)))
-    (read-block ctx pos len)))
+(define-value-reader block2
+  (lambda (ctx pos)
+    (let-values (((len pos) (read-u16 ctx pos)))
+      (read-block ctx pos len)))
+  (lambda (ctx pos)
+    (+ pos 2 (bytevector-u16-ref (ctx-bv ctx) pos (ctx-endianness ctx)))))
 
-(define-value-reader (block4 ctx pos)
-  (let-values (((len pos) (read-u32 ctx pos)))
-    (read-block ctx pos len)))
+(define-value-reader block4
+  (lambda (ctx pos)
+    (let-values (((len pos) (read-u32 ctx pos)))
+      (read-block ctx pos len)))
+  (lambda (ctx pos)
+    (+ pos 4 (bytevector-u32-ref (ctx-bv ctx) pos (ctx-endianness ctx)))))
 
-(define-value-reader data1 read-u8)
-(define-value-reader data2 read-u16)
-(define-value-reader data4 read-u32)
-(define-value-reader data8 read-u64)
-(define-value-reader udata read-uleb128)
-(define-value-reader sdata read-sleb128)
+(define-value-reader data1 read-u8 skip-8)
+(define-value-reader data2 read-u16 skip-16)
+(define-value-reader data4 read-u32 skip-32)
+(define-value-reader data8 read-u64 skip-64)
+(define-value-reader udata read-uleb128 skip-leb128)
+(define-value-reader sdata read-sleb128 skip-leb128)
 
-(define-value-reader (flag ctx pos)
-  (values (not (zero? (bytevector-u8-ref (ctx-bv ctx) pos)))
-          (1+ pos)))
+(define-value-reader flag
+  (lambda (ctx pos)
+    (values (not (zero? (bytevector-u8-ref (ctx-bv ctx) pos)))
+            (1+ pos)))
+  skip-8)
 
-(define-value-reader string read-string)
+(define-value-reader string
+  read-string
+  skip-string)
 
-(define-value-reader (strp ctx pos)
-  (unless (ctx-strtab-start ctx)
-    (error "expected a string table" ctx))
-  (let-values (((offset pos) (read-u32 ctx pos)))
-    (values (read-string ctx (+ (ctx-strtab-start ctx) offset))
-            pos)))
+(define-value-reader strp
+  (lambda (ctx pos)
+    (unless (ctx-strtab-start ctx)
+      (error "expected a string table" ctx))
+    (let-values (((offset pos) (read-u32 ctx pos)))
+      (values (read-string ctx (+ (ctx-strtab-start ctx) offset))
+              pos)))
+  skip-32)
 
-(define-value-reader (ref-addr ctx pos)
-  (let-values (((addr pos) (read-addr ctx pos)))
-    (values (+ addr (ctx-vaddr ctx))
-            pos)))
+(define-value-reader ref-addr
+  (lambda (ctx pos)
+    (let-values (((addr pos) (read-addr ctx pos)))
+      (values (+ addr (ctx-info-start ctx))
+              pos)))
+  skip-addr)
 
-(define-value-reader (ref1 ctx pos)
-  (let-values (((addr pos) (read-u8 ctx pos)))
-    (values (+ addr (current-compilation-offset))
-            pos)))
+(define-value-reader ref1
+  (lambda (ctx pos)
+    (let-values (((addr pos) (read-u8 ctx pos)))
+      (values (+ addr (current-compilation-offset))
+              pos)))
+  skip-8)
 
-(define-value-reader (ref2 ctx pos)
-  (let-values (((addr pos) (read-u16 ctx pos)))
-    (values (+ addr (current-compilation-offset))
-            pos)))
+(define-value-reader ref2
+  (lambda (ctx pos)
+    (let-values (((addr pos) (read-u16 ctx pos)))
+      (values (+ addr (current-compilation-offset))
+              pos)))
+  skip-16)
 
-(define-value-reader (ref4 ctx pos)
-  (let-values (((addr pos) (read-u32 ctx pos)))
-    (values (+ addr (current-compilation-offset))
-            pos)))
+(define-value-reader ref4
+  (lambda (ctx pos)
+    (let-values (((addr pos) (read-u32 ctx pos)))
+      (values (+ addr (current-compilation-offset))
+              pos)))
+  skip-32)
 
-(define-value-reader (ref8 ctx pos)
-  (let-values (((addr pos) (read-u64 ctx pos)))
-    (values (+ addr (current-compilation-offset))
-            pos)))
+(define-value-reader ref8
+  (lambda (ctx pos)
+    (let-values (((addr pos) (read-u64 ctx pos)))
+      (values (+ addr (current-compilation-offset))
+              pos)))
+  skip-64)
 
-(define-value-reader (ref-udata ctx pos)
-  (let-values (((addr pos) (read-uleb128 ctx pos)))
-    (values (+ addr (current-compilation-offset))
-            pos)))
+(define-value-reader ref
+  (lambda (udata ctx pos)
+    (let-values (((addr pos) (read-uleb128 ctx pos)))
+      (values (+ addr (current-compilation-offset))
+              pos)))
+  skip-leb128)
 
-(define-value-reader (indirect ctx pos)
-  (let*-values (((form pos) (read-uleb128 ctx pos))
-                ((val pos) (read-value ctx pos (form-code->name form))))
-    (values (cons form val)
-            pos)))
+(define-value-reader indirect
+  (lambda (ctx pos)
+    (let*-values (((form pos) (read-uleb128 ctx pos))
+                  ((val pos) (read-value ctx pos (form-code->name form))))
+      (values (cons form val)
+              pos)))
+  (lambda (ctx pos)
+    (let*-values (((form pos) (read-uleb128 ctx pos)))
+      (skip-value ctx pos (form-code->name form)))))
 
 (define (read-value ctx pos form)
   ((or (hashq-ref *readers* form)
        (error "unrecognized form" form))
    ctx pos))
 
+(define (skip-value ctx pos form)
+  ((or (hashq-ref *scanners* form)
+       (error "unrecognized form" form))
+   ctx pos))
+
+;; Parsers for particular attributes.
+;;
 (define (parse-location-list ctx offset)
   (let lp ((pos (+ (ctx-loc-start ctx) offset))
            (out '()))
@@ -865,7 +935,7 @@
   die?
   (offset die-offset)
   (abbrev die-abbrev)
-  (vals die-vals)
+  (vals %die-vals %set-die-vals!)
   (children die-children set-die-children!))
 
 (define (die-tag die)
@@ -877,11 +947,34 @@
 (define (die-forms die)
   (abbrev-forms (die-abbrev die)))
 
+(define (die-vals die)
+  (let ((vals (%die-vals die)))
+    (if (or (null? vals) (pair? vals))
+        vals
+        (parameterize ((current-compilation-offset vals))
+          (%set-die-vals! die (read-values die))
+          (die-vals die)))))
+
 (define* (die-ref die attr #:optional default)
   (cond
    ((list-index (die-attrs die) attr)
     => (lambda (n) (list-ref (die-vals die) n)))
    (else default)))
+
+(define (read-values die)
+  (let* ((abbrev (die-abbrev die))
+         (ctx (abbrev-ctx abbrev)))
+    (parameterize ((current-context ctx))
+      (let lp ((attrs (abbrev-attrs abbrev))
+               (forms (abbrev-forms abbrev))
+               (vals '())
+               (pos (skip-leb128 ctx (die-offset die))))
+        (if (null? forms)
+            (reverse vals)
+            (let-values (((val pos) (read-value ctx pos (car forms))))
+              (lp (cdr attrs) (cdr forms)
+                  (cons (parse-attribute (car attrs) val) vals)
+                  pos)))))))
 
 (define (read-die ctx pos av)
   (let ((offset pos))
@@ -890,17 +983,12 @@
           (values #f pos)
           (let ((abbrev (or (vector-ref av code)
                             (error "unknown abbrev" av code))))
-            (let lp ((attrs (abbrev-attrs abbrev))
-                     (forms (abbrev-forms abbrev))
-                     (vals '())
-                     (pos pos))
+            (let lp ((forms (abbrev-forms abbrev)) (pos pos))
               (if (null? forms)
-                  (values (make-die offset abbrev (reverse vals) '())
+                  (values (make-die offset abbrev (current-compilation-offset)
+                                    '())
                           pos)
-                  (let-values (((val pos) (read-value ctx pos (car forms))))
-                    (lp (cdr attrs) (cdr forms)
-                        (cons (parse-attribute (car attrs) val) vals)
-                        pos)))))))))
+                  (lp (cdr forms) (skip-value ctx pos (car forms))))))))))
 
 (define (read-die-tree ctx pos av)
   (let-values (((die pos) (read-die ctx pos av)))
