@@ -227,8 +227,10 @@ result to ensure its sanity.
                              (not (die-ref die 'declaration)))))
                   (option-ref options 'deep #f))))
       (unless type
-        (error "Failed to find ~a in library" (or tag "definition")
-               lib name))
+        (format (current-error-port)
+                "ERROR: Failed to find ~a in library ~a: ~a\n"
+                (or tag "definition") lib name)
+        (exit 1))
       (pretty-print type))))
 
 (define (dispatch-command command args debug?)
