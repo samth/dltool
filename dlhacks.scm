@@ -509,7 +509,6 @@
 (define* (find-die roots pred #:key
                    (skip? (lambda (ctx offset abbrev) #f))
                    (recurse? (lambda (die) #t)))
-  ;; Breadth-first search.
   (let/ec k
     (define (visit-die die)
       (cond
