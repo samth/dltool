@@ -450,7 +450,8 @@
       (case (die-tag die)
         ((subprogram variable)
          (when (and (die-ref die 'external)
-                    (not (die-ref die 'declaration)))
+                    (not (die-ref die 'declaration))
+                    (not (die-ref die 'inline)))
            (let ((name (die-ref die 'name)))
              (when name
                (let ((handle (hash-get-handle externs name)))
