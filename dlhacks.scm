@@ -327,27 +327,25 @@
 (define (find-die-context roots offset)
   (define (not-found)
     (error "failed to find DIE by context" offset))
-  (match roots
-    (() (not-found))
-    ((head . tail)
-     (when (< offset (die-compilation-unit-offset head))
-       (not-found))
-     (let lp ((head head) (tail tail))
-       (match tail
-         (()
-          (die-ctx head))
-         ((next . tail)
-          (if (< (die-compilation-unit-offset next) offset)
-              (lp next tail)
-              (die-ctx head))))))))
+  (let lp ((roots roots))
+    (match roots
+      (() (not-found))
+      ((head . tail)
+       (let ((ctx (die-ctx head)))
+         (cond
+          ((< offset (ctx-start ctx))
+           ;; Assumes sorted order.
+           (not-found))
+          ((< offset (ctx-end ctx))
+           ctx)
+          (else
+           (lp tail))))))))
 
 (define* (find-die-by-offset roots offset #:optional current-die)
-  (define (in-current-compilation-unit? offset)
-    ;; A conservative approximation.
-    (<= (die-compilation-unit-offset current-die)
-        offset
-        (die-offset current-die)))
-  (or (read-die (if (and current-die (in-current-compilation-unit? offset))
+  (define (in-current-context? offset)
+    (and (<= (ctx-start (die-ctx current-die)) offset)
+         (< offset (ctx-end (die-ctx current-die)))))
+  (or (read-die (if (and current-die (in-current-context? offset))
                     (die-ctx current-die)
                     (find-die-context roots offset))
                 offset)
