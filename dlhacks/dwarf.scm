@@ -37,9 +37,9 @@
   #:use-module (srfi srfi-9 gnu)
   #:use-module (srfi srfi-11)
   #:export (elf->dwarf-context
-            read-debuginfo
+            read-die-roots
 
-            abbrev? abbrev-tag abbrev-attrs abbrev-forms
+            abbrev? abbrev-tag abbrev-has-children? abbrev-attrs abbrev-forms
 
             die? die-ctx die-offset die-abbrev die-vals die-children
             die-compilation-unit-offset
@@ -543,32 +543,35 @@
 ;;; A general configuration object.
 ;;;
 
-(define-record-type <dwarf-offsets>
-  (make-dwarf-offsets vaddr memsz
-                      info-start info-end
-                      abbrevs-start abbrevs-end
-                      strtab-start strtab-end
-                      loc-start loc-end)
-  dwarf-offsets?
-  (vaddr offsets-vaddr)
-  (memsz offsets-memsz)
-  (info-start offsets-info-start)
-  (info-end offsets-info-end)
-  (abbrevs-start offsets-abbrevs-start)
-  (abbrevs-end offsets-abbrevs-end)
-  (strtab-start offsets-strtab-start)
-  (strtab-end offsets-strtab-end)
-  (loc-start offsets-loc-start)
-  (loc-end offsets-loc-end))
+(define-record-type <dwarf-meta>
+  (make-dwarf-meta vaddr memsz
+                   path lib-path
+                   info-start info-end
+                   abbrevs-start abbrevs-end
+                   strtab-start strtab-end
+                   loc-start loc-end)
+  dwarf-meta?
+  (vaddr meta-vaddr)
+  (memsz meta-memsz)
+  (path meta-path)
+  (lib-path meta-lib-path)
+  (info-start meta-info-start)
+  (info-end meta-info-end)
+  (abbrevs-start meta-abbrevs-start)
+  (abbrevs-end meta-abbrevs-end)
+  (strtab-start meta-strtab-start)
+  (strtab-end meta-strtab-end)
+  (loc-start meta-loc-start)
+  (loc-end meta-loc-end))
 
 (define-record-type <dwarf-context>
-  (make-dwarf-context bv word-size endianness offsets
+  (make-dwarf-context bv word-size endianness meta
                       parent offset abbrevs)
   dwarf-context?
   (bv ctx-bv)
   (word-size ctx-word-size)
   (endianness ctx-endianness)
-  (offsets ctx-offsets)
+  (meta ctx-meta)
   (parent ctx-parent)
   (offset ctx-offset)
   (abbrevs ctx-abbrevs))
@@ -707,10 +710,10 @@
                 pos))))))
 
 (define* (read-abbrevs ctx pos
-                       #:optional (start (offsets-abbrevs-start
-                                          (ctx-offsets ctx)))
-                       (end (offsets-abbrevs-end
-                             (ctx-offsets ctx))))
+                       #:optional (start (meta-abbrevs-start
+                                          (ctx-meta ctx)))
+                       (end (meta-abbrevs-end
+                             (ctx-meta ctx))))
   (let lp ((abbrevs '()) (pos (+ start pos)) (max-code -1))
     (if (zero? (read-u8 ctx pos))
         (if (< pos end)
@@ -786,7 +789,7 @@
 
 (define-value-reader strp
   (lambda (ctx pos)
-    (let ((strtab (offsets-strtab-start (ctx-offsets ctx))))
+    (let ((strtab (meta-strtab-start (ctx-meta ctx))))
       (unless strtab
         (error "expected a string table" ctx))
       (let-values (((offset pos) (read-u32 ctx pos)))
@@ -797,7 +800,7 @@
 (define-value-reader ref-addr
   (lambda (ctx pos)
     (let-values (((addr pos) (read-addr ctx pos)))
-      (values (+ addr (offsets-info-start (ctx-offsets ctx)))
+      (values (+ addr (meta-info-start (ctx-meta ctx)))
               pos)))
   skip-addr)
 
@@ -859,7 +862,7 @@
 ;; Parsers for particular attributes.
 ;;
 (define (parse-location-list ctx offset)
-  (let lp ((pos (+ (offsets-loc-start (ctx-offsets ctx)) offset))
+  (let lp ((pos (+ (meta-loc-start (ctx-meta ctx)) offset))
            (out '()))
     (let*-values (((start pos) (read-addr ctx pos))
                   ((end pos) (read-addr ctx pos)))
@@ -955,7 +958,7 @@
 ;; "Debugging Information Entries": DIEs.
 ;;
 (define-record-type <die>
-  (make-die ctx offset abbrev vals children)
+  (make-die ctx offset abbrev vals)
   die?
   (ctx die-ctx)
   (offset die-offset)
@@ -973,8 +976,7 @@
 
 (define (die-vals die)
   (let ((vals (%die-vals die)))
-    (if (or (null? vals) (pair? vals))
-        vals
+    (or vals
         (begin
           (%set-die-vals! die (read-values (die-ctx die) (skip-leb128 (die-ctx die) (die-offset die)) (die-abbrev die)))
           (die-vals die)))))
@@ -1023,10 +1025,7 @@
 (define (read-die ctx offset)
   (let*-values (((abbrev pos) (read-die-abbrev ctx offset)))
     (if abbrev
-        (values (make-die ctx offset abbrev #f
-                          (if (abbrev-has-children? abbrev)
-                              #f
-                              '()))
+        (values (make-die ctx offset abbrev #f)
                 (skip-values ctx pos abbrev))
         (values #f pos))))
 
@@ -1069,7 +1068,7 @@
         (lp (die-sibling ctx abbrev offset pos) seed))
        (else
         (let-values (((vals pos) (read-values ctx pos abbrev)))
-          (let* ((die (make-die ctx offset abbrev vals (if (abbrev-has-children? abbrev) #f '())))
+          (let* ((die (make-die ctx offset abbrev vals))
                  (seed (proc die seed)))
             (lp (die-sibling ctx abbrev offset #f pos) seed))))))))
 
@@ -1086,7 +1085,7 @@
 (define (make-compilation-unit-context parent offset abbrevs)
   (make-dwarf-context (ctx-bv parent)
                       (ctx-word-size parent) (ctx-endianness parent)
-                      (ctx-offsets parent)
+                      (ctx-meta parent)
                       parent offset abbrevs))
 
 (define (read-compilation-unit ctx pos)
@@ -1099,16 +1098,17 @@
       (values (read-die (make-compilation-unit-context ctx start av) pos)
               (+ start 4 len)))))
 
-(define (read-debuginfo ctx)
-  (let lp ((dies '()) (pos (offsets-info-start (ctx-offsets ctx))))
-    (if (< pos (offsets-info-end (ctx-offsets ctx)))
+(define (read-die-roots ctx)
+  (let lp ((dies '()) (pos (meta-info-start (ctx-meta ctx))))
+    (if (< pos (meta-info-end (ctx-meta ctx)))
         (let-values (((die pos) (read-compilation-unit ctx pos)))
           (if die
               (lp (cons die dies) pos)
               (reverse dies)))
         (reverse dies))))
 
-(define* (elf->dwarf-context elf #:optional (vaddr 0) (memsz 0))
+(define* (elf->dwarf-context elf #:key (vaddr 0) (memsz 0)
+                             (path #f) (lib-path path))
   (let* ((sections (elf-sections-by-name elf))
          (info (assoc-ref sections ".debug_info"))
          (abbrevs (assoc-ref sections ".debug_abbrev"))
@@ -1117,8 +1117,9 @@
     (make-dwarf-context (elf-bytes elf)
                         (elf-word-size elf)
                         (elf-byte-order elf)
-                        (make-dwarf-offsets
+                        (make-dwarf-meta
                          vaddr memsz
+                         path lib-path
                          (elf-section-offset info)
                          (+ (elf-section-offset info)
                             (elf-section-size info))
@@ -1143,6 +1144,3 @@
                     (lambda (die seed)
                       (cons (die->tree die) seed))
                     (fold acons '() (die-attrs die) (die-vals die))))))
-
-(define (debuginfo->tree die-list)
-  (map die->tree die-list))

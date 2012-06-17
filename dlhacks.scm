@@ -44,6 +44,7 @@
             system-library-search-path
             find-library
             find-debug-object
+            load-dwarf-context
             extract-exported-symbols
             extract-definitions
             extract-one-definition))
@@ -286,10 +287,8 @@
     (and (has-elf-magic? path)
          path)))
 
-(define (find-debug-object library)
-  (let* ((bv (call-with-input-file library get-bytevector-all))
-         (elf (parse-elf bv))
-         (sections (elf-sections-by-name elf)))
+(define (find-debug-object library elf)
+  (let ((sections (elf-sections-by-name elf)))
     (or (and (assoc-ref sections ".debug_info")
              library)
         (and=> (assoc-ref sections ".note.gnu.build-id")
@@ -301,10 +300,29 @@
         (and=> (assoc-ref sections ".gnu_debuglink")
                (lambda (section)
                  (let-values (((basename crc)
-                               (read-debuglink bv (elf-section-offset section)
+                               (read-debuglink (elf-bytes elf)
+                                               (elf-section-offset section)
                                                (elf-section-size section)
                                                (elf-byte-order elf))))
-                   (search-debug-dirs basename (dirname library))))))))
+                   (search-debug-dirs basename (dirname library)))))
+        (error "No debugging symbols for library" library))))
+
+(define (load-elf file)
+  (parse-elf (call-with-input-file file get-bytevector-all)))
+
+(define (load-dwarf-context lib)
+  (let* ((lib-path (if (string-index lib #\/)
+                       lib
+                       (or (find-library lib)
+                           (error "Failed to find library" lib))))
+         (lib-elf (load-elf lib-path))
+         (dbg-path (find-debug-object lib-path lib-elf)))
+    (values (elf->dwarf-context (if (equal? lib-path dbg-path)
+                                    lib-elf
+                                    (load-elf dbg-path))
+                                #:path dbg-path
+                                #:lib-path lib-path)
+            lib-elf)))
 
 (define (extract-declaration die resolve-die intern-type)
   (define (recur* die)
@@ -378,7 +396,7 @@
         (or (die-ref die 'name)
             (error "anonymous type should not get here"))))
 
-(define (extract-definitions names debuginfo)
+(define (extract-definitions ctx names)
   (let ((by-offset (make-hash-table))
         (externs (make-hash-table))
         (types-by-die (make-hash-table))
@@ -411,7 +429,7 @@
                     (else #t))
               (hash-set! externs name die)))))
       (for-each intern-die (die-children die)))
-    (for-each intern-die debuginfo)
+    (for-each intern-die (read-die-roots ctx))
     (let lp ((names names) (out '()))
       (match names
         ((name . names)
@@ -432,18 +450,29 @@
                      (reverse out)
                      types-by-name))))))
 
-(define (find-die debuginfo pred)
+(define-syntax-rule (let/ec k e e* ...)
+  (let ((tag (make-prompt-tag)))
+    (call-with-prompt
+     tag
+     (lambda ()
+       (let ((k (lambda args (apply abort-to-prompt tag args))))
+         e e* ...))
+     (lambda (_ res) res))))
+
+(define* (find-die roots pred #:key
+                   (skip? (lambda (ctx offset abbrev) #f))
+                   (recurse? (lambda (die) #t)))
   ;; Breadth-first search.
-  (let lp ((in debuginfo) (kids '()))
-    (match in
-      ((head . in)
-       (if (pred head)
-           head
-           (lp in (cons (die-children head) kids))))
-      (()
-       (if (null? kids)
-           #f
-           (lp (concatenate (reverse kids)) '()))))))
+  (let/ec k
+    (define (visit-die die)
+      (cond
+       ((pred die)
+        (k die))
+       ((recurse? die)
+        (fold-die-children die skip? (lambda (die seed) (visit-die die)) #f))
+       (else #f)))
+    (for-each visit-die roots)
+    #f))
 
 (define (find-die-context compilation-units offset)
   (or (or-map (lambda (die)
@@ -452,41 +481,47 @@
               compilation-units)
       (error "compilation unit not found" offset)))
 
-(define* (extract-one-definition debuginfo pred #:optional (depth 1))
-  (define* (visit-die x seen)
-    (define (in-current-compilation-unit? offset)
-      ;; A conservative approximation.
-      (<= (die-compilation-unit-offset x) offset (die-offset x)))
-    (define (find-die-by-offset offset)
-      (read-die (if (in-current-compilation-unit? offset)
-                    (die-ctx x)
-                    (find-die-context debuginfo offset))
-                offset))
-    (define (recur y)
-      (visit-die y (cons x seen)))
-    (define (visit-type offset)
-      (recur (or (find-die-by-offset offset)
-                 (error "what!"))))
-    (define (visit-attr attr val tail)
-      (case attr
-        ((decl-file decl-line sibling low-pc high-pc frame-base
-                    external location)
-         tail)
-        ((type)
-         (cons (list attr (visit-type val)) tail))
-        (else
-         (cons (list attr val) tail))))
-    (if (and (or (< depth (length seen))
-                 (find (lambda (y) (equal? (die-offset y) (die-offset x)))
-                       seen))
-             (memq (die-tag x)
-                   '(structure-type union-type class-type typedef
-                                    enumeration-type))
-             (die-ref x 'name))
-        (type-name x)
-        (cons (die-tag x)
-              (fold visit-attr
-                    (map recur (die-children x))
-                    (reverse (die-attrs x))
-                    (reverse (die-vals x))))))
-  (and=> (find-die debuginfo pred) (cut visit-die <> '())))
+(define* (extract-one-definition ctx pred #:optional (depth 1))
+  (let ((roots (read-die-roots ctx)))
+    (define* (visit-die x seen)
+      (define (in-current-compilation-unit? offset)
+        ;; A conservative approximation.
+        (<= (die-compilation-unit-offset x) offset (die-offset x)))
+      (define (find-die-by-offset offset)
+        (read-die (if (in-current-compilation-unit? offset)
+                      (die-ctx x)
+                      (find-die-context roots offset))
+                  offset))
+      (define (recur y)
+        (visit-die y (cons x seen)))
+      (define (visit-type offset)
+        (recur (or (find-die-by-offset offset)
+                   (error "what!"))))
+      (define (visit-attr attr val tail)
+        (case attr
+          ((decl-file decl-line sibling low-pc high-pc frame-base
+                      external location)
+           tail)
+          ((type)
+           (cons (list attr (visit-type val)) tail))
+          (else
+           (cons (list attr val) tail))))
+      (if (and (or (< depth (length seen))
+                   (find (lambda (y) (equal? (die-offset y) (die-offset x)))
+                         seen))
+               (memq (die-tag x)
+                     '(structure-type union-type class-type typedef
+                                      enumeration-type))
+               (die-ref x 'name))
+          (type-name x)
+          (cons (die-tag x)
+                (fold visit-attr
+                      (map recur (die-children x))
+                      (reverse (die-attrs x))
+                      (reverse (die-vals x))))))
+    (and=> (find-die roots pred
+                     #:recurse? (lambda (die)
+                                  (case (die-tag die)
+                                    ((compile-unit) #t)
+                                    (else #f))))
+           (cut visit-die <> '()))))

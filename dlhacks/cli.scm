@@ -136,19 +136,12 @@ separate debug objects, if needed.
     (emit-bug-reporting-address "dlhacks" "wingo@igalia.com"
                                 #:url "https://gitorious.org/guile-dlhacks/"))))
 
-(define (load-elf file)
-  (parse-elf (call-with-input-file file get-bytevector-all)))
-
-(define (all-exports lib-path)
-  (sort (map elf-symbol-name (extract-exported-symbols (load-elf lib-path)))
+(define (all-exports lib-elf)
+  (sort (map elf-symbol-name (extract-exported-symbols lib-elf))
         string<?))
 
-(define (load-debug lib-path)
-  (let ((dbg (find-debug-object lib-path)))
-    (unless dbg
-      (error "No debugging symbols for library" lib-path))
-    (read-debuginfo
-     (elf->dwarf-context (load-elf dbg) 0 0))))
+(define (load-die-roots lib)
+  (read-die-roots (load-dwarf-context lib)))
 
 (define-command ((grovel) options lib . syms)
   "grovel LIB [SYM...]
@@ -160,15 +153,13 @@ types that they use.  Otherwise, declarations for all exported symbols
 are printed.
 "
   (for-each pretty-print
-            (let* ((lib-path (if (string-index lib #\/)
-                                 lib
-                                 (find-library lib))))
-              (unless lib-path
-                (error "Failed to find library" lib))
-              (extract-definitions (if (null? syms)
-                                       (all-exports lib-path)
-                                       syms)
-                                   (load-debug lib-path)))))
+            (call-with-values (lambda ()
+                                (load-dwarf-context lib))
+              (lambda (ctx lib-elf)
+                (extract-definitions ctx
+                                     (if (null? syms)
+                                         (all-exports lib-elf)
+                                         syms))))))
 
 (define-command ((dump) options lib)
   "dump LIB
@@ -179,12 +170,7 @@ It's a bit much, but it's useful for debugging.
 "
   (for-each (lambda (x)
               (pretty-print (die->tree x) #:width 120))
-            (let* ((lib-path (if (string-index lib #\/)
-                                 lib
-                                 (find-library lib))))
-              (unless lib-path
-                (error "Failed to find library" lib))
-              (load-debug lib-path))))
+            (load-die-roots lib)))
 
 (define-command ((define (depth (value #t))) options lib name #:optional tag)
   "define [--depth=N] LIB NAME [KIND]
@@ -209,15 +195,10 @@ other compilation units, but it is always possible to define a type
 local to a compilation unit (e.g. inside the C file).  So do check the
 result to ensure its sanity.
 "
-  (let ((lib-path (if (string-index lib #\/)
-                      lib
-                      (find-library lib)))
+  (let ((ctx (load-dwarf-context lib))
         (tag (and=> tag string->symbol)))
-    (unless lib-path
-      (error "Failed to find library" lib))
-    (let* ((debuginfo (load-debug lib-path))
-           (type (extract-one-definition
-                  debuginfo
+    (let* ((type (extract-one-definition
+                  ctx
                   (lambda (die)
                     (and (or (not tag)
                              (eq? (die-tag die) tag))
