@@ -537,31 +537,36 @@
 ;;; A general configuration object.
 ;;;
 
-(define-record-type <dwarf-context>
-  (make-dwarf-context bv
-                      vaddr memsz
+(define-record-type <dwarf-offsets>
+  (make-dwarf-offsets vaddr memsz
                       info-start info-end
                       abbrevs-start abbrevs-end
                       strtab-start strtab-end
-                      loc-start loc-end
-                      word-size endianness)
+                      loc-start loc-end)
+  dwarf-offsets?
+  (vaddr offsets-vaddr)
+  (memsz offsets-memsz)
+  (info-start offsets-info-start)
+  (info-end offsets-info-end)
+  (abbrevs-start offsets-abbrevs-start)
+  (abbrevs-end offsets-abbrevs-end)
+  (strtab-start offsets-strtab-start)
+  (strtab-end offsets-strtab-end)
+  (loc-start offsets-loc-start)
+  (loc-end offsets-loc-end))
+
+(define-record-type <dwarf-context>
+  (make-dwarf-context bv word-size endianness offsets
+                      parent offset abbrevs)
   dwarf-context?
   (bv ctx-bv)
-  (vaddr ctx-vaddr)
-  (memsz ctx-memsz)
-  (info-start ctx-info-start)
-  (info-end ctx-info-end)
-  (abbrevs-start ctx-abbrevs-start)
-  (abbrevs-end ctx-abbrevs-end)
-  (strtab-start ctx-strtab-start)
-  (strtab-end ctx-strtab-end)
-  (loc-start ctx-loc-start)
-  (loc-end ctx-loc-end)
   (word-size ctx-word-size)
-  (endianness ctx-endianness))
+  (endianness ctx-endianness)
+  (offsets ctx-offsets)
+  (parent ctx-parent)
+  (offset ctx-offset)
+  (abbrevs ctx-abbrevs))
 
-(define current-compilation-offset (make-parameter 0))
-(define current-context (make-parameter #f))
 
 ;;;
 ;;; Procedures for reading DWARF data.
@@ -665,9 +670,8 @@
           (lp (1+ end))))))
 
 (define-record-type <abbrev>
-  (make-abbrev ctx code tag has-children? attrs forms)
+  (make-abbrev code tag has-children? attrs forms)
   abbrev?
-  (ctx abbrev-ctx)
   (code abbrev-code)
   (tag abbrev-tag)
   (has-children? abbrev-has-children?)
@@ -682,8 +686,7 @@
       (let*-values (((attr pos) (read-uleb128 ctx pos))
                     ((form pos) (read-uleb128 ctx pos)))
         (if (and (zero? attr) (zero? form))
-            (values (make-abbrev ctx
-                                 code
+            (values (make-abbrev code
                                  (tag-code->name tag)
                                  (eq? (children-code->name children) 'yes)
                                  (reverse attrs)
@@ -694,8 +697,10 @@
                 pos))))))
 
 (define* (read-abbrevs ctx pos
-                       #:optional (start (ctx-abbrevs-start ctx))
-                       (end (ctx-abbrevs-end ctx)))
+                       #:optional (start (offsets-abbrevs-start
+                                          (ctx-offsets ctx)))
+                       (end (offsets-abbrevs-end
+                             (ctx-offsets ctx))))
   (let lp ((abbrevs '()) (pos (+ start pos)) (max-code -1))
     (if (zero? (read-u8 ctx pos))
         (if (< pos end)
@@ -771,52 +776,53 @@
 
 (define-value-reader strp
   (lambda (ctx pos)
-    (unless (ctx-strtab-start ctx)
-      (error "expected a string table" ctx))
-    (let-values (((offset pos) (read-u32 ctx pos)))
-      (values (read-string ctx (+ (ctx-strtab-start ctx) offset))
-              pos)))
+    (let ((strtab (offsets-strtab-start (ctx-offsets ctx))))
+      (unless strtab
+        (error "expected a string table" ctx))
+      (let-values (((offset pos) (read-u32 ctx pos)))
+        (values (read-string ctx (+ strtab offset))
+                pos))))
   skip-32)
 
 (define-value-reader ref-addr
   (lambda (ctx pos)
     (let-values (((addr pos) (read-addr ctx pos)))
-      (values (+ addr (ctx-info-start ctx))
+      (values (+ addr (offsets-info-start (ctx-offsets ctx)))
               pos)))
   skip-addr)
 
 (define-value-reader ref1
   (lambda (ctx pos)
     (let-values (((addr pos) (read-u8 ctx pos)))
-      (values (+ addr (current-compilation-offset))
+      (values (+ addr (ctx-offset ctx))
               pos)))
   skip-8)
 
 (define-value-reader ref2
   (lambda (ctx pos)
     (let-values (((addr pos) (read-u16 ctx pos)))
-      (values (+ addr (current-compilation-offset))
+      (values (+ addr (ctx-offset ctx))
               pos)))
   skip-16)
 
 (define-value-reader ref4
   (lambda (ctx pos)
     (let-values (((addr pos) (read-u32 ctx pos)))
-      (values (+ addr (current-compilation-offset))
+      (values (+ addr (ctx-offset ctx))
               pos)))
   skip-32)
 
 (define-value-reader ref8
   (lambda (ctx pos)
     (let-values (((addr pos) (read-u64 ctx pos)))
-      (values (+ addr (current-compilation-offset))
+      (values (+ addr (ctx-offset ctx))
               pos)))
   skip-64)
 
 (define-value-reader ref
   (lambda (udata ctx pos)
     (let-values (((addr pos) (read-uleb128 ctx pos)))
-      (values (+ addr (current-compilation-offset))
+      (values (+ addr (ctx-offset ctx))
               pos)))
   skip-leb128)
 
@@ -843,7 +849,7 @@
 ;; Parsers for particular attributes.
 ;;
 (define (parse-location-list ctx offset)
-  (let lp ((pos (+ (ctx-loc-start ctx) offset))
+  (let lp ((pos (+ (offsets-loc-start (ctx-offsets ctx)) offset))
            (out '()))
     (let*-values (((start pos) (read-addr ctx pos))
                   ((end pos) (read-addr ctx pos)))
@@ -851,14 +857,15 @@
           (reverse out)
           (let*-values (((len pos) (read-u16 ctx pos))
                         ((block pos) (read-block ctx pos len)))
-            (lp pos (cons (list start end (parse-location block)) out)))))))
+            (lp pos
+                (cons (list start end (parse-location ctx block)) out)))))))
 
-(define (parse-location loc)
+(define (parse-location ctx loc)
   (cond
    ((bytevector? loc)
     (let ((len (bytevector-length loc))
-          (word-size (ctx-word-size (current-context)))
-          (endianness (ctx-endianness (current-context))))
+          (word-size (ctx-word-size ctx))
+          (endianness (ctx-endianness ctx)))
       (define (u8-ref pos) (bytevector-u8-ref loc pos))
       (define (s8-ref pos) (bytevector-s8-ref loc pos))
       (define (u16-ref pos) (bytevector-u16-ref loc pos endianness))
@@ -909,35 +916,38 @@
                      loc
                      (lp (1+ pos) (cons (list op) out))))))))))
    (else
-    (parse-location-list (current-context) loc))))
+    (parse-location-list ctx loc))))
 
 (define-syntax-rule (define-attribute-parsers parse (name parser) ...)
   (define parse
     (let ((parsers (make-hash-table)))
       (hashq-set! parsers 'name parser)
       ...
-      (lambda (attr val)
-        ((hashq-ref parsers attr identity) val)))))
+      (lambda (ctx attr val)
+        (cond
+         ((hashq-ref parsers attr) => (lambda (p) (p ctx val)))
+         (else val))))))
 
 (define-attribute-parsers parse-attribute
-  (encoding type-encoding->name)
-  (accessibility access-code->name)
-  (visibility visibility-code->name)
-  (virtuality virtuality-code->name)
-  (language language-code->name)
+  (encoding (lambda (ctx val) (type-encoding->name val)))
+  (accessibility (lambda (ctx val) (access-code->name val)))
+  (visibility (lambda (ctx val) (visibility-code->name val)))
+  (virtuality (lambda (ctx val) (virtuality-code->name val)))
+  (language (lambda (ctx val) (language-code->name val)))
   (location parse-location)
   (data-member-location parse-location)
-  (case-sensitive case-sensitivity-code->name)
-  (calling-convention calling-convention-code->name)
-  (inline inline-code->name)
-  (ordering ordering-code->name)
-  (discr-value discriminant-code->name))
+  (case-sensitive (lambda (ctx val) (case-sensitivity-code->name val)))
+  (calling-convention (lambda (ctx val) (calling-convention-code->name val)))
+  (inline (lambda (ctx val) (inline-code->name val)))
+  (ordering (lambda (ctx val) (ordering-code->name val)))
+  (discr-value (lambda (ctx val) (discriminant-code->name val))))
 
 ;; "Debugging Information Entries": DIEs.
 ;;
 (define-record-type <die>
-  (make-die offset abbrev vals children)
+  (make-die ctx offset abbrev vals children)
   die?
+  (ctx die-ctx)
   (offset die-offset)
   (abbrev die-abbrev)
   (vals %die-vals %set-die-vals!)
@@ -956,7 +966,7 @@
   (let ((vals (%die-vals die)))
     (if (or (null? vals) (pair? vals))
         vals
-        (parameterize ((current-compilation-offset vals))
+        (begin
           (%set-die-vals! die (read-values die))
           (die-vals die)))))
 
@@ -967,36 +977,33 @@
    (else default)))
 
 (define (read-values die)
-  (let* ((abbrev (die-abbrev die))
-         (ctx (abbrev-ctx abbrev)))
-    (parameterize ((current-context ctx))
-      (let lp ((attrs (abbrev-attrs abbrev))
-               (forms (abbrev-forms abbrev))
-               (vals '())
-               (pos (skip-leb128 ctx (die-offset die))))
-        (if (null? forms)
-            (reverse vals)
-            (let-values (((val pos) (read-value ctx pos (car forms))))
-              (lp (cdr attrs) (cdr forms)
-                  (cons (parse-attribute (car attrs) val) vals)
-                  pos)))))))
+  (let ((abbrev (die-abbrev die))
+        (ctx (die-ctx die)))
+    (let lp ((attrs (abbrev-attrs abbrev))
+             (forms (abbrev-forms abbrev))
+             (vals '())
+             (pos (skip-leb128 ctx (die-offset die))))
+      (if (null? forms)
+          (reverse vals)
+          (let-values (((val pos) (read-value ctx pos (car forms))))
+            (lp (cdr attrs) (cdr forms)
+                (cons (parse-attribute ctx (car attrs) val) vals)
+                pos))))))
 
-(define (read-die ctx pos av)
-  (let ((offset pos))
-    (let*-values (((code pos) (read-uleb128 ctx pos)))
-      (if (zero? code)
-          (values #f pos)
-          (let ((abbrev (or (vector-ref av code)
-                            (error "unknown abbrev" av code))))
-            (let lp ((forms (abbrev-forms abbrev)) (pos pos))
-              (if (null? forms)
-                  (values (make-die offset abbrev (current-compilation-offset)
-                                    '())
-                          pos)
-                  (lp (cdr forms) (skip-value ctx pos (car forms))))))))))
+(define (read-die ctx offset)
+  (let*-values (((code pos) (read-uleb128 ctx offset)))
+    (if (zero? code)
+        (values #f pos)
+        (let ((abbrev (or (vector-ref (ctx-abbrevs ctx) code)
+                          (error "unknown abbrev" ctx code))))
+          (let lp ((forms (abbrev-forms abbrev)) (pos pos))
+            (if (null? forms)
+                (values (make-die ctx offset abbrev #f '())
+                        pos)
+                (lp (cdr forms) (skip-value ctx pos (car forms)))))))))
 
-(define (read-die-tree ctx pos av)
-  (let-values (((die pos) (read-die ctx pos av)))
+(define (read-die-tree ctx pos)
+  (let-values (((die pos) (read-die ctx pos)))
     (cond
      ((not die)
       (values die pos))
@@ -1004,31 +1011,36 @@
       (values die pos))
      (else
       (let lp ((kids '()) (pos pos))
-        (let-values (((kid pos) (read-die-tree ctx pos av)))
+        (let-values (((kid pos) (read-die-tree ctx pos)))
           (if kid
               (lp (cons kid kids) pos)
               (begin
                 (set-die-children! die (reverse kids))
                 (values die pos)))))))))
 
+(define (make-compilation-unit-context parent offset abbrevs)
+  (make-dwarf-context (ctx-bv parent)
+                      (ctx-word-size parent) (ctx-endianness parent)
+                      (ctx-offsets parent)
+                      parent offset abbrevs))
+
 (define (read-compilation-unit ctx pos)
-  (parameterize ((current-compilation-offset pos))
+  (let ((start pos))
     (let*-values (((len pos) (read-u32 ctx pos))
                   ((version pos) (read-u16 ctx pos))
                   ((abbrevs-offset pos) (read-u32 ctx pos))
                   ((av) (read-abbrevs ctx abbrevs-offset))
                   ((addrsize pos) (read-u8 ctx pos)))
-      (read-die-tree ctx pos av))))
+      (read-die-tree (make-compilation-unit-context ctx start av) pos))))
 
 (define (read-debuginfo ctx)
-  (parameterize ((current-context ctx))
-    (let lp ((dies '()) (pos (ctx-info-start ctx)))
-      (if (< pos (ctx-info-end ctx))
-          (let-values (((die pos) (read-compilation-unit ctx pos)))
-            (if die
-                (lp (cons die dies) pos)
-                (reverse dies)))
-          (reverse dies)))))
+  (let lp ((dies '()) (pos (offsets-info-start (ctx-offsets ctx))))
+    (if (< pos (offsets-info-end (ctx-offsets ctx)))
+        (let-values (((die pos) (read-compilation-unit ctx pos)))
+          (if die
+              (lp (cons die dies) pos)
+              (reverse dies)))
+        (reverse dies))))
 
 (define (elf->dwarf-context elf vaddr memsz)
   (let* ((sections (elf-sections-by-name elf))
@@ -1036,21 +1048,24 @@
          (abbrevs (assoc-ref sections ".debug_abbrev"))
          (strtab (assoc-ref sections ".debug_str"))
          (loc (assoc-ref sections ".debug_loc")))
-    (make-dwarf-context (elf-bytes elf) vaddr memsz
-                        (elf-section-offset info)
-                        (+ (elf-section-offset info)
-                           (elf-section-size info))
-                        (elf-section-offset abbrevs)
-                        (+ (elf-section-offset abbrevs)
-                           (elf-section-size abbrevs))
-                        (elf-section-offset strtab)
-                        (+ (elf-section-offset strtab)
-                           (elf-section-size strtab))
-                        (elf-section-offset loc)
-                        (+ (elf-section-offset loc)
-                           (elf-section-size loc))
+    (make-dwarf-context (elf-bytes elf)
                         (elf-word-size elf)
-                        (elf-byte-order elf))))
+                        (elf-byte-order elf)
+                        (make-dwarf-offsets
+                         vaddr memsz
+                         (elf-section-offset info)
+                         (+ (elf-section-offset info)
+                            (elf-section-size info))
+                         (elf-section-offset abbrevs)
+                         (+ (elf-section-offset abbrevs)
+                            (elf-section-size abbrevs))
+                         (elf-section-offset strtab)
+                         (+ (elf-section-offset strtab)
+                            (elf-section-size strtab))
+                         (elf-section-offset loc)
+                         (+ (elf-section-offset loc)
+                            (elf-section-size loc)))
+                        #f #f #f)))
 
 (define (die->tree die)
   (cons* (die-tag die)
