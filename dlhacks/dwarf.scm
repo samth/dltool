@@ -32,16 +32,21 @@
   #:use-module (system foreign)
   #:use-module (system base target)
   #:use-module (dlhacks elf)
+  #:use-module ((srfi srfi-1) #:select (fold))
   #:use-module (srfi srfi-9)
+  #:use-module (srfi srfi-9 gnu)
   #:use-module (srfi srfi-11)
   #:export (elf->dwarf-context
             read-debuginfo
-            debuginfo->tree
 
             abbrev? abbrev-tag abbrev-attrs abbrev-forms
 
             die? die-offset die-abbrev die-vals die-children
-            die-tag die-attrs die-forms die-ref))
+            die-tag die-attrs die-forms die-ref
+
+            read-die fold-die-list
+
+            fold-die-children die->tree))
 
 ;;;
 ;;; First, define a number of constants.  The figures numbers refer to
@@ -567,6 +572,10 @@
   (offset ctx-offset)
   (abbrevs ctx-abbrevs))
 
+(set-record-type-printer! <dwarf-context>
+                          (lambda (x port)
+                            (format port "<dwarf-context ~a>"
+                                    (number->string (object-address x) 16))))
 
 ;;;
 ;;; Procedures for reading DWARF data.
@@ -950,8 +959,7 @@
   (ctx die-ctx)
   (offset die-offset)
   (abbrev die-abbrev)
-  (vals %die-vals %set-die-vals!)
-  (children %die-children %set-die-children!))
+  (vals %die-vals %set-die-vals!))
 
 (define (die-tag die)
   (abbrev-tag (die-abbrev die)))
@@ -970,21 +978,10 @@
           (%set-die-vals! die (read-values (die-ctx die) (skip-leb128 (die-ctx die) (die-offset die)) (die-abbrev die)))
           (die-vals die)))))
 
-(define (die-children die)
-  (let ((kids (%die-children die)))
-    (if (or (null? kids) (pair? kids))
-        kids
-        (begin
-          (%set-die-children!
-           die
-           (let ((ctx (die-ctx die)))
-             (let*-values (((abbrev pos) (read-die-abbrev ctx (die-offset die)))
-                           ((pos) (skip-values ctx pos abbrev)))
-               (reverse (fold-die-list ctx pos
-                                       (lambda (ctx offset abbrev) #f)
-                                       cons
-                                       '())))))
-          (die-children die)))))
+(define* (die-next-offset die #:optional offset-vals)
+  (let ((ctx (die-ctx die)))
+    (skip-values ctx (or offset-vals (skip-leb128 ctx (die-offset die)))
+                 (die-abbrev die))))
 
 (define* (die-ref die attr #:optional default)
   (cond
@@ -1029,22 +1026,6 @@
                 (skip-values ctx pos abbrev))
         (values #f pos))))
 
-(define (read-die-tree ctx pos)
-  (let-values (((die pos) (read-die ctx pos)))
-    (cond
-     ((not die)
-      (values die pos))
-     ((not (abbrev-has-children? (die-abbrev die)))
-      (values die pos))
-     (else
-      (let lp ((kids '()) (pos pos))
-        (let-values (((kid pos) (read-die-tree ctx pos)))
-          (if kid
-              (lp (cons kid kids) pos)
-              (begin
-                (%set-die-children! die (reverse kids))
-                (values die pos)))))))))
-
 (define* (die-sibling ctx abbrev offset #:optional offset-vals offset-end)
   (cond
    ((not (abbrev-has-children? abbrev))
@@ -1087,6 +1068,16 @@
           (let* ((die (make-die ctx offset abbrev vals (if (abbrev-has-children? abbrev) #f '())))
                  (seed (proc die seed)))
             (lp (die-sibling ctx abbrev offset #f pos) seed))))))))
+
+(define (fold-die-children die skip? proc seed)
+  (if (abbrev-has-children? (die-abbrev die))
+      (values (fold-die-list (die-ctx die) (die-next-offset die)
+                             skip? proc seed))
+      seed))
+
+(define (die-children die)
+  (define (skip? ctx offset abbrev) #f)
+  (reverse (fold-die-children die skip? cons '())))
 
 (define (make-compilation-unit-context parent offset abbrevs)
   (make-dwarf-context (ctx-bv parent)
@@ -1139,10 +1130,15 @@
                         #f #f #f)))
 
 (define (die->tree die)
+  (define (skip? ctx offset abbrev) #f)
   (cons* (die-tag die)
          (cons 'offset (die-offset die))
-         (append (map cons (die-attrs die) (die-vals die))
-                 (map die->tree (die-children die)))))
+         (reverse! (fold-die-children
+                    die
+                    skip?
+                    (lambda (die seed)
+                      (cons (die->tree die) seed))
+                    (fold acons '() (die-attrs die) (die-vals die))))))
 
 (define (debuginfo->tree die-list)
   (map die->tree die-list))

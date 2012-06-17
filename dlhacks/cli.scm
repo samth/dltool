@@ -178,13 +178,13 @@ This command prints all information that it can find out to the console.
 It's a bit much, but it's useful for debugging.
 "
   (for-each (lambda (x)
-              (pretty-print x #:width 120))
+              (pretty-print (die->tree x) #:width 120))
             (let* ((lib-path (if (string-index lib #\/)
                                  lib
                                  (find-library lib))))
               (unless lib-path
                 (error "Failed to find library" lib))
-              (debuginfo->tree (load-debug lib-path)))))
+              (load-debug lib-path))))
 
 (define-command ((define (depth (value #t))) options lib name #:optional tag)
   "define [--depth=N] LIB NAME [KIND]
