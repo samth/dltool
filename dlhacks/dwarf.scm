@@ -951,7 +951,7 @@
   (offset die-offset)
   (abbrev die-abbrev)
   (vals %die-vals %set-die-vals!)
-  (children die-children set-die-children!))
+  (children %die-children %set-die-children!))
 
 (define (die-tag die)
   (abbrev-tag (die-abbrev die)))
@@ -967,8 +967,24 @@
     (if (or (null? vals) (pair? vals))
         vals
         (begin
-          (%set-die-vals! die (read-values die))
+          (%set-die-vals! die (read-values (die-ctx die) (skip-leb128 (die-ctx die) (die-offset die)) (die-abbrev die)))
           (die-vals die)))))
+
+(define (die-children die)
+  (let ((kids (%die-children die)))
+    (if (or (null? kids) (pair? kids))
+        kids
+        (begin
+          (%set-die-children!
+           die
+           (let ((ctx (die-ctx die)))
+             (let*-values (((abbrev pos) (read-die-abbrev ctx (die-offset die)))
+                           ((pos) (skip-values ctx pos abbrev)))
+               (reverse (fold-die-list ctx pos
+                                       (lambda (ctx offset abbrev) #f)
+                                       cons
+                                       '())))))
+          (die-children die)))))
 
 (define* (die-ref die attr #:optional default)
   (cond
@@ -976,31 +992,42 @@
     => (lambda (n) (list-ref (die-vals die) n)))
    (else default)))
 
-(define (read-values die)
-  (let ((abbrev (die-abbrev die))
-        (ctx (die-ctx die)))
-    (let lp ((attrs (abbrev-attrs abbrev))
-             (forms (abbrev-forms abbrev))
-             (vals '())
-             (pos (skip-leb128 ctx (die-offset die))))
-      (if (null? forms)
-          (reverse vals)
-          (let-values (((val pos) (read-value ctx pos (car forms))))
-            (lp (cdr attrs) (cdr forms)
-                (cons (parse-attribute ctx (car attrs) val) vals)
-                pos))))))
+(define (read-values ctx offset abbrev)
+  (let lp ((attrs (abbrev-attrs abbrev))
+           (forms (abbrev-forms abbrev))
+           (vals '())
+           (pos offset))
+    (if (null? forms)
+        (values (reverse vals) pos)
+        (let-values (((val pos) (read-value ctx pos (car forms))))
+          (lp (cdr attrs) (cdr forms)
+              (cons (parse-attribute ctx (car attrs) val) vals)
+              pos)))))
+
+(define (skip-values ctx offset abbrev)
+  (let lp ((forms (abbrev-forms abbrev))
+           (pos offset))
+    (if (null? forms)
+        pos
+        (lp (cdr forms) (skip-value ctx pos (car forms))))))
+
+(define (read-die-abbrev ctx offset)
+  (let*-values (((code pos) (read-uleb128 ctx offset)))
+    (values (cond ((zero? code) #f)
+                  ((vector-ref (ctx-abbrevs ctx) code))
+                  (else (error "unknown abbrev" ctx code)))
+            pos
+            #f pos)))
 
 (define (read-die ctx offset)
-  (let*-values (((code pos) (read-uleb128 ctx offset)))
-    (if (zero? code)
-        (values #f pos)
-        (let ((abbrev (or (vector-ref (ctx-abbrevs ctx) code)
-                          (error "unknown abbrev" ctx code))))
-          (let lp ((forms (abbrev-forms abbrev)) (pos pos))
-            (if (null? forms)
-                (values (make-die ctx offset abbrev #f '())
-                        pos)
-                (lp (cdr forms) (skip-value ctx pos (car forms)))))))))
+  (let*-values (((abbrev pos) (read-die-abbrev ctx offset)))
+    (if abbrev
+        (values (make-die ctx offset abbrev #f
+                          (if (abbrev-has-children? abbrev)
+                              #f
+                              '()))
+                (skip-values ctx pos abbrev))
+        (values #f pos))))
 
 (define (read-die-tree ctx pos)
   (let-values (((die pos) (read-die ctx pos)))
@@ -1015,8 +1042,51 @@
           (if kid
               (lp (cons kid kids) pos)
               (begin
-                (set-die-children! die (reverse kids))
+                (%set-die-children! die (reverse kids))
                 (values die pos)))))))))
+
+(define* (die-sibling ctx abbrev offset #:optional offset-vals offset-end)
+  (cond
+   ((not (abbrev-has-children? abbrev))
+    (or offset-end
+        (skip-values ctx
+                     (or offset-vals (skip-leb128 ctx offset))
+                     abbrev)))
+   ((memq 'sibling (abbrev-attrs abbrev))
+    (let lp ((offset (or offset-vals (skip-leb128 ctx offset)))
+             (attrs (abbrev-attrs abbrev))
+             (forms (abbrev-forms abbrev)))
+      (if (eq? (car attrs) 'sibling)
+          (read-value ctx offset (car forms))
+          (lp (skip-value ctx offset (car forms))
+              (cdr attrs) (cdr forms)))))
+   (else
+    (call-with-values
+        (lambda ()
+          (fold-die-list ctx
+                         (or offset-end
+                             (skip-values ctx
+                                          (or offset-vals
+                                              (skip-leb128 ctx offset))
+                                          abbrev))
+                         (lambda (ctx offset abbrev) #t)
+                         error
+                         #f))
+      (lambda (seed pos)
+        pos)))))
+
+(define (fold-die-list ctx offset skip? proc seed)
+  (let lp ((offset offset) (seed seed))
+    (let-values (((abbrev pos) (read-die-abbrev ctx offset)))
+      (cond
+       ((not abbrev) (values seed pos))
+       ((skip? ctx offset abbrev)
+        (lp (die-sibling ctx abbrev offset pos) seed))
+       (else
+        (let-values (((vals pos) (read-values ctx pos abbrev)))
+          (let* ((die (make-die ctx offset abbrev vals (if (abbrev-has-children? abbrev) #f '())))
+                 (seed (proc die seed)))
+            (lp (die-sibling ctx abbrev offset #f pos) seed))))))))
 
 (define (make-compilation-unit-context parent offset abbrevs)
   (make-dwarf-context (ctx-bv parent)
@@ -1031,7 +1101,8 @@
                   ((abbrevs-offset pos) (read-u32 ctx pos))
                   ((av) (read-abbrevs ctx abbrevs-offset))
                   ((addrsize pos) (read-u8 ctx pos)))
-      (read-die-tree (make-compilation-unit-context ctx start av) pos))))
+      (values (read-die (make-compilation-unit-context ctx start av) pos)
+              (+ start 4 len)))))
 
 (define (read-debuginfo ctx)
   (let lp ((dies '()) (pos (offsets-info-start (ctx-offsets ctx))))
@@ -1042,7 +1113,7 @@
               (reverse dies)))
         (reverse dies))))
 
-(define (elf->dwarf-context elf vaddr memsz)
+(define* (elf->dwarf-context elf #:optional (vaddr 0) (memsz 0))
   (let* ((sections (elf-sections-by-name elf))
          (info (assoc-ref sections ".debug_info"))
          (abbrevs (assoc-ref sections ".debug_abbrev"))
