@@ -364,10 +364,17 @@
            (intern-type die)
            (type-name die)))
       ((structure-type union-type enumeration-type class-type)
-       (let ((name (die-ref die 'name)))
-         (if name
-             (intern-type die)
-             (recur* die))))
+       (cond
+        ((die-ref die 'name)
+         (intern-type die))
+        ((die-ref die 'specification)
+         => (lambda (offset)
+              (let ((spec (find-die-by-offset roots offset die)))
+                (if (die-ref spec 'name)
+                    (intern-type die spec)
+                    (recur* die)))))
+        (else
+         (recur* die))))
       (else
        (recur* die))))
   (define (visit-type offset)
@@ -377,7 +384,7 @@
       ((decl-file decl-line sibling low-pc high-pc frame-base external
         location)
        tail)
-      ((type)
+      ((type containing-type specification)
        (cons (list attr (visit-type val)) tail))
       (else
        (cons (list attr val) tail))))
@@ -414,7 +421,7 @@
            (reverse (die-attrs die))
            (reverse (die-vals die))))))
 
-(define (type-name die)
+(define* (type-name die #:optional spec)
   (list (case (die-tag die)
           ((structure-type) 'struct)
           ((union-type) 'union)
@@ -423,6 +430,7 @@
           ((enumeration-type) 'enum)
           (else (error "Don't know how to name" die)))
         (or (die-ref die 'name)
+            (and spec (die-ref spec 'name))
             (error "anonymous type should not get here"))))
 
 (define (extract-definitions ctx names)
@@ -432,10 +440,10 @@
         (roots (read-die-roots ctx)))
     (define (prepare-extern name)
       (hash-set! externs name #f))
-    (define (intern-type die)
-      (or (hashq-ref types-by-offset (die-offset die))
-          (let* ((name (type-name die)))
-            (hashq-set! types-by-offset (die-offset die) name)
+    (define* (intern-type die #:optional spec)
+      (or (hashv-ref types-by-offset (die-offset die))
+          (let* ((name (type-name die spec)))
+            (hashv-set! types-by-offset (die-offset die) name)
             (unless (die-ref die 'declaration)
               (let ((decl (extract-declaration roots die intern-type)))
                 (match (vhash-assoc name types-by-name)
@@ -469,7 +477,6 @@
                                 (else #t)))
                             (lambda (die seed) (find-externs die))
                             #f))))
-
     (for-each prepare-extern names)
     (for-each find-externs roots)
     (let lp ((names names) (out '()))
@@ -529,7 +536,7 @@
           ((decl-file decl-line sibling low-pc high-pc frame-base
                       external location)
            tail)
-          ((type)
+          ((type containing-type specification)
            (cons (list attr (visit-type val)) tail))
           (else
            (cons (list attr val) tail))))
