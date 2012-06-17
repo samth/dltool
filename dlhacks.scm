@@ -445,26 +445,27 @@
            #f
            (lp (concatenate (reverse kids)) '()))))))
 
-(define (find-die-by-offset debuginfo offset)
-  (let lp ((die-list debuginfo))
-    (match die-list
-      (() #f)
-      ((head . rest)
-       (cond
-        ((= offset (die-offset head)) head)
-        ((< offset (die-offset head)) #f)
-        (else
-         (lp (if (or (null? rest)
-                     (< offset (die-offset (car rest))))
-                 (die-children head)
-                 rest))))))))
+(define (find-die-context compilation-units offset)
+  (or (or-map (lambda (die)
+                (and (<= (die-compilation-unit-offset die) offset)
+                     (die-ctx die)))
+              compilation-units)
+      (error "compilation unit not found" offset)))
 
 (define* (extract-one-definition debuginfo pred #:optional (depth 1))
   (define* (visit-die x seen)
+    (define (in-current-compilation-unit? offset)
+      ;; A conservative approximation.
+      (<= (die-compilation-unit-offset x) offset (die-offset x)))
+    (define (find-die-by-offset offset)
+      (read-die (if (in-current-compilation-unit? offset)
+                    (die-ctx x)
+                    (find-die-context debuginfo offset))
+                offset))
     (define (recur y)
       (visit-die y (cons x seen)))
     (define (visit-type offset)
-      (recur (or (find-die-by-offset debuginfo offset)
+      (recur (or (find-die-by-offset offset)
                  (error "what!"))))
     (define (visit-attr attr val tail)
       (case attr

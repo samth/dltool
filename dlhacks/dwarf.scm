@@ -41,7 +41,8 @@
 
             abbrev? abbrev-tag abbrev-attrs abbrev-forms
 
-            die? die-offset die-abbrev die-vals die-children
+            die? die-ctx die-offset die-abbrev die-vals die-children
+            die-compilation-unit-offset
             die-tag die-attrs die-forms die-ref
 
             read-die fold-die-list
@@ -977,6 +978,9 @@
         (begin
           (%set-die-vals! die (read-values (die-ctx die) (skip-leb128 (die-ctx die) (die-offset die)) (die-abbrev die)))
           (die-vals die)))))
+
+(define (die-compilation-unit-offset die)
+  (ctx-offset (die-ctx die)))
 
 (define* (die-next-offset die #:optional offset-vals)
   (let ((ctx (die-ctx die)))
