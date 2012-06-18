@@ -46,6 +46,7 @@
             find-library
             find-debug-object
             load-dwarf-context
+            empty-declaration?
             extract-exported-symbols
             extract-definitions
             extract-one-definition))
@@ -325,6 +326,14 @@
                                 #:lib-path lib-path)
             lib-elf)))
 
+(define (empty-declaration? die)
+  (case (die-tag die)
+    ((typedef) (not (die-ref die 'type)))
+    ((structure-type class-type union-type
+                     enumeration-type)
+     (not (die-ref die 'byte-size)))
+    (else #f)))
+
 (define (extract-declaration die intern-type)
   (define (recur* die)
     (extract-declaration die intern-type))
@@ -337,14 +346,8 @@
            (type-name die)))
       ((structure-type union-type enumeration-type class-type)
        (cond
-        ((die-ref die 'name)
+        ((die-name die)
          (intern-type die))
-        ((die-ref die 'specification)
-         => (lambda (offset)
-              (let ((spec (find-die-by-offset (die-ctx die) offset)))
-                (if (die-ref spec 'name)
-                    (intern-type die)
-                    (recur* die)))))
         (else
          (recur* die))))
       (else
@@ -407,9 +410,7 @@
                             (not (eq? (die-tag next) 'compile-unit)))
                        (type-name* next)
                        '())))))
-     ((die-ref die 'specification)
-      => (lambda (offset)
-           (type-name* (find-die-by-offset (die-ctx die) offset))))
+     ((die-specification die) => type-name*)
      (else
       (error "anonymous type should not get here" die))))
   (cons 'named-type-reference (type-name* die)))
@@ -481,7 +482,7 @@
       (or (hashv-ref types-by-offset (die-offset die))
           (let* ((name (type-name die)))
             (hashv-set! types-by-offset (die-offset die) name)
-            (unless (die-ref die 'declaration)
+            (unless (empty-declaration? die)
               (let ((decl (extract-declaration die intern-type)))
                 (match (vhash-assoc name types-by-name)
                   ((name* . decl*)
@@ -525,7 +526,7 @@
            => (lambda (die)
                 (lp names
                     (let ((decl (extract-declaration die intern-type)))
-                      (cons (if (equal? (die-ref die 'name) name)
+                      (cons (if (equal? (die-name die) name)
                                 decl
                                 (cons* (car decl)
                                        (list 'public-name name)
@@ -565,7 +566,7 @@
                (memq (die-tag x)
                      '(structure-type union-type class-type typedef
                                       enumeration-type))
-               (die-ref x 'name))
+               (die-name x))
           (type-name x)
           (cons (die-tag x)
                 (fold visit-attr

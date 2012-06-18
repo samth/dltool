@@ -44,6 +44,7 @@
 
             die? die-ctx die-offset die-abbrev die-vals die-children
             die-tag die-attrs die-forms die-ref
+            die-name die-specification die-qname
 
             ctx-parent ctx-die ctx-start ctx-end ctx-children ctx-language
 
@@ -1109,6 +1110,26 @@
    ((list-index (die-attrs die) attr)
     => (lambda (n) (list-ref (die-vals die) n)))
    (else default)))
+
+(define (die-specification die)
+  (and=> (die-ref die 'specification)
+         (lambda (offset) (find-die-by-offset (die-ctx die) offset))))
+
+(define (die-name die)
+  (or (die-ref die 'name)
+      (and=> (die-specification die) die-name)))
+
+(define (die-qname die)
+  (cond
+   ((eq? (die-tag die) 'compile-unit) "")
+   ((die-ref die 'name)
+    => (lambda (name)
+         (if (eq? (die-tag (ctx-die (die-ctx die))) 'compile-unit)
+             name ; short cut
+             (string-append (die-qname (ctx-die (die-ctx die))) "::" name))))
+   ((die-specification die)
+    => die-qname)
+   (else #f)))
 
 (define (read-values ctx offset abbrev)
   (let lp ((attrs (abbrev-attrs abbrev))
