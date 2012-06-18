@@ -237,6 +237,7 @@
   (pure #x67)
   (recursive #x68)
   ;; Extensions.
+  (linkage-name #x2007)
   (sf-names #x2101)
   (src-info #x2102)
   (mac-info #x2103)
@@ -1285,7 +1286,7 @@
                          (ctx-meta ctx)
                          (ctx-abbrevs ctx)
                          ctx die
-                         (die-offset die)
+                         (die-next-offset die)
                          (die-sibling ctx (die-abbrev die) (die-offset die))
                          '()))))
 
@@ -1296,10 +1297,10 @@
 (define (populate-context-tree! die)
   (define (skip? ctx offset abbrev)
     (case (abbrev-tag abbrev)
-      ((class-type structure-type) #t)
+      ((class-type structure-type namespace) #f)
       (else #t)))
   (case (die-tag die)
-    ((compile-unit class-type structure-type)
+    ((compile-unit class-type structure-type namespace)
      (let ((ctx (make-child-context die)))
        ;; For C++, descend into classes and structures so that we
        ;; populate the context tree.  Note that for compile-unit, we

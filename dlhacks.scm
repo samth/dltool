@@ -343,7 +343,7 @@
          => (lambda (offset)
               (let ((spec (find-die-by-offset (die-ctx die) offset)))
                 (if (die-ref spec 'name)
-                    (intern-type die spec)
+                    (intern-type die)
                     (recur* die)))))
         (else
          (recur* die))))
@@ -354,7 +354,7 @@
   (define (visit-attr attr val tail)
     (case attr
       ((decl-file decl-line sibling low-pc high-pc frame-base external
-        location)
+        location linkage-name)
        tail)
       ((type containing-type specification object-pointer import)
        (cons (list attr (visit-type val)) tail))
@@ -395,32 +395,24 @@
            (reverse (die-attrs die))
            (reverse (die-vals die))))))
 
-(define (ctx-namespace-name ctx)
-  (cond
-   ((ctx-die ctx)
-    => (lambda (die)
-         (case (die-tag die)
-           ((compile-unit) '())
-           (else
-            (cons (type-name die)
-                  (ctx-namespace-name (die-ctx die)))))))
-   (else '())))
 
-(define* (type-name die #:optional spec)
-  (cond
-   ((die-ref die 'name)
-    => (lambda (name)
-         (list 'named-type-reference
-               (cons* (die-tag die)
-                      name
-                      (ctx-namespace-name (die-ctx die))))))
-   ((and spec (die-ref spec 'name))
-    (type-name spec))
-   ((die-ref die 'specification)
-    => (lambda (offset)
-         (type-name (find-die-by-offset (die-ctx die) offset))))
-   (else
-    (error "anonymous type should not get here" die))))
+(define (type-name die)
+  (define (type-name* die)
+    (cond
+     ((die-ref die 'name)
+      => (lambda (name)
+           (cons (list (die-tag die) name)
+                 (let ((next (ctx-die (die-ctx die))))
+                   (if (and next
+                            (not (eq? (die-tag next) 'compile-unit)))
+                       (type-name* next)
+                       '())))))
+     ((die-ref die 'specification)
+      => (lambda (offset)
+           (type-name* (find-die-by-offset (die-ctx die) offset))))
+     (else
+      (error "anonymous type should not get here" die))))
+  (cons 'named-type-reference (type-name* die)))
 
 ;; A new declaration is compatible with an previous one if it has the
 ;; same size as the previous one, and only differs in declarations of
@@ -435,6 +427,15 @@
   ;; A "subset" has fewer decls than a "superset".
   (define (compatible-subset? sub super)
     (match sub
+      (('base-type . sub-attrs)
+       (match super
+         (('base-type . super-attrs)
+          ;; Notably, the names can be different.
+          (and (equal? (assq 'byte-size sub-attrs)
+                       (assq 'byte-size super-attrs))
+               (equal? (assq 'encoding sub-attrs)
+                       (assq 'encoding super-attrs))))
+         (_ #f)))
       ((sub-head . sub-tail)
        (match super
          ((super-head . super-tail)
@@ -456,7 +457,15 @@
              ;; with `structure-type' followed by a `class-type'
              ;; corresponding to a "struct foo : public bar" definition.
              (and (memq sub '(class-type structure-type))
-                  (memq super '(class-type structure-type)))))))
+                  (memq super '(class-type structure-type)))
+             (and (string? sub) (string? super)
+                  ;; AFAIK this should not be necessary, but currently it
+                  ;; is in some cases.
+                  (begin
+                    (format (current-error-port)
+                            "warning: string mismatch, assuming ok: ~a vs ~a\n"
+                            sub super)
+                    #t))))))
   (or (equal? decl previous-decl)
       (compatible-subset? previous-decl decl)
       (compatible-subset? decl previous-decl)))
@@ -468,9 +477,9 @@
         (roots (read-die-roots ctx)))
     (define (prepare-extern name)
       (hash-set! externs name #f))
-    (define* (intern-type die #:optional spec)
+    (define* (intern-type die)
       (or (hashv-ref types-by-offset (die-offset die))
-          (let* ((name (type-name die spec)))
+          (let* ((name (type-name die)))
             (hashv-set! types-by-offset (die-offset die) name)
             (unless (die-ref die 'declaration)
               (let ((decl (extract-declaration die intern-type)))
@@ -544,7 +553,7 @@
       (define (visit-attr attr val tail)
         (case attr
           ((decl-file decl-line sibling low-pc high-pc frame-base
-                      external location)
+                      external location linkage-name)
            tail)
           ((type containing-type specification object-pointer import)
            (cons (list attr (visit-type val)) tail))
