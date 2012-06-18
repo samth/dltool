@@ -44,7 +44,8 @@
             die? die-ctx die-offset die-abbrev die-vals die-children
             die-tag die-attrs die-forms die-ref
 
-            ctx-parent-die ctx-start ctx-end
+            ctx-parent ctx-die ctx-start ctx-end ctx-children
+            make-child-context
 
             read-die fold-die-list
 
@@ -568,16 +569,18 @@
 (define-record-type <dwarf-context>
   (make-dwarf-context bv word-size endianness meta
                       abbrevs
-                      parent start end)
+                      parent die start end children)
   dwarf-context?
   (bv ctx-bv)
   (word-size ctx-word-size)
   (endianness ctx-endianness)
   (meta ctx-meta)
   (abbrevs ctx-abbrevs)
-  (parent-die ctx-parent-die)
+  (parent ctx-parent)
+  (die ctx-die)
   (start ctx-start)
-  (end ctx-end))
+  (end ctx-end)
+  (children ctx-children set-children!))
 
 
 (set-record-type-printer! <dwarf-context>
@@ -732,6 +735,11 @@
               pos
               (max (abbrev-code abbrev) max-code))))))
 
+(define (ctx-compile-unit-start ctx)
+  (if (ctx-die ctx)
+      (ctx-compile-unit-start (ctx-parent ctx))
+      (ctx-start ctx)))
+
 ;; Values.
 ;;
 (define *readers* (make-hash-table))
@@ -811,35 +819,35 @@
 (define-value-reader ref1
   (lambda (ctx pos)
     (let-values (((addr pos) (read-u8 ctx pos)))
-      (values (+ addr (ctx-start ctx))
+      (values (+ addr (ctx-compile-unit-start ctx))
               pos)))
   skip-8)
 
 (define-value-reader ref2
   (lambda (ctx pos)
     (let-values (((addr pos) (read-u16 ctx pos)))
-      (values (+ addr (ctx-start ctx))
+      (values (+ addr (ctx-compile-unit-start ctx))
               pos)))
   skip-16)
 
 (define-value-reader ref4
   (lambda (ctx pos)
     (let-values (((addr pos) (read-u32 ctx pos)))
-      (values (+ addr (ctx-start ctx))
+      (values (+ addr (ctx-compile-unit-start ctx))
               pos)))
   skip-32)
 
 (define-value-reader ref8
   (lambda (ctx pos)
     (let-values (((addr pos) (read-u64 ctx pos)))
-      (values (+ addr (ctx-start ctx))
+      (values (+ addr (ctx-compile-unit-start ctx))
               pos)))
   skip-64)
 
 (define-value-reader ref
   (lambda (udata ctx pos)
     (let-values (((addr pos) (read-uleb128 ctx pos)))
-      (values (+ addr (ctx-start ctx))
+      (values (+ addr (ctx-compile-unit-start ctx))
               pos)))
   skip-leb128)
 
@@ -1073,21 +1081,41 @@
                  (seed (proc die seed)))
             (lp (die-sibling ctx abbrev offset #f pos) seed))))))))
 
-(define (fold-die-children die skip? proc seed)
+(define* (fold-die-children die proc seed #:key
+                            (skip? (lambda (ctx offset abbrev) #f))
+                            (ctx (die-ctx die)))
   (if (abbrev-has-children? (die-abbrev die))
-      (values (fold-die-list (die-ctx die) (die-next-offset die)
+      (values (fold-die-list ctx (die-next-offset die)
                              skip? proc seed))
       seed))
 
 (define (die-children die)
-  (define (skip? ctx offset abbrev) #f)
-  (reverse (fold-die-children die skip? cons '())))
+  (reverse (fold-die-children die cons '())))
+
+(define (add-to-parent! ctx)
+  (let ((parent (ctx-parent ctx)))
+    (set-children! parent
+                   (append (ctx-children parent) (list ctx)))
+    ctx))
 
 (define (make-compilation-unit-context ctx abbrevs start len)
-  (make-dwarf-context (ctx-bv ctx)
-                      (ctx-word-size ctx) (ctx-endianness ctx)
-                      (ctx-meta ctx)
-                      abbrevs #f start (+ start 4 len)))
+  (add-to-parent!
+   (make-dwarf-context (ctx-bv ctx)
+                       (ctx-word-size ctx) (ctx-endianness ctx)
+                       (ctx-meta ctx)
+                       abbrevs ctx #f start (+ start 4 len) '())))
+
+(define (make-child-context die)
+  (let ((ctx (die-ctx die)))
+    (add-to-parent!
+     (make-dwarf-context (ctx-bv ctx)
+                         (ctx-word-size ctx) (ctx-endianness ctx)
+                         (ctx-meta ctx)
+                         (ctx-abbrevs ctx)
+                         ctx die
+                         (die-offset die)
+                         (die-sibling ctx (die-abbrev die) (die-offset die))
+                         '()))))
 
 (define (read-compilation-unit ctx pos)
   (let*-values (((start) pos)
@@ -1134,15 +1162,17 @@
                          (elf-section-offset loc)
                          (+ (elf-section-offset loc)
                             (elf-section-size loc)))
-                        #() #f 0 0)))
+                        #() #f #f
+                        (elf-section-offset info)
+                        (+ (elf-section-offset info)
+                           (elf-section-size info))
+                        '())))
 
 (define (die->tree die)
-  (define (skip? ctx offset abbrev) #f)
   (cons* (die-tag die)
          (cons 'offset (die-offset die))
          (reverse! (fold-die-children
                     die
-                    skip?
                     (lambda (die seed)
                       (cons (die->tree die) seed))
                     (fold acons '() (die-attrs die) (die-vals die))))))

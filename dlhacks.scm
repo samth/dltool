@@ -324,36 +324,33 @@
                                 #:lib-path lib-path)
             lib-elf)))
 
-(define (find-die-context roots offset)
+(define (find-die-context ctx offset)
   (define (not-found)
     (error "failed to find DIE by context" offset))
-  (let lp ((roots roots))
-    (match roots
-      (() (not-found))
-      ((head . tail)
-       (let ((ctx (die-ctx head)))
-         (cond
-          ((< offset (ctx-start ctx))
-           ;; Assumes sorted order.
-           (not-found))
-          ((< offset (ctx-end ctx))
-           ctx)
-          (else
-           (lp tail))))))))
+  (define (in-context? ctx)
+    (and (<= (ctx-start ctx) offset)
+         (< offset (ctx-end ctx))))
+  (define (find-root ctx)
+    (if (in-context? ctx)
+        ctx
+        (find-root (or (ctx-parent ctx) (not-found)))))
+  (define (find-leaf ctx)
+    (let lp ((kids (ctx-children ctx)))
+      (match kids
+        (() ctx)
+        ((head . tail)
+         (if (in-context? head)
+             (find-leaf head)
+             (lp tail))))))
+  (find-leaf (find-root ctx)))
 
-(define* (find-die-by-offset roots offset #:optional current-die)
-  (define (in-current-context? offset)
-    (and (<= (ctx-start (die-ctx current-die)) offset)
-         (< offset (ctx-end (die-ctx current-die)))))
-  (or (read-die (if (and current-die (in-current-context? offset))
-                    (die-ctx current-die)
-                    (find-die-context roots offset))
-                offset)
+(define* (find-die-by-offset current-die offset)
+  (or (read-die (find-die-context (die-ctx current-die) offset) offset)
       (error "Failed to read DIE at offset" offset)))
 
-(define (extract-declaration roots die intern-type)
+(define (extract-declaration die intern-type)
   (define (recur* die)
-    (extract-declaration roots die intern-type))
+    (extract-declaration die intern-type))
   (define (recur die)
     (case (die-tag die)
       ((typedef)
@@ -367,7 +364,7 @@
          (intern-type die))
         ((die-ref die 'specification)
          => (lambda (offset)
-              (let ((spec (find-die-by-offset roots offset die)))
+              (let ((spec (find-die-by-offset die offset)))
                 (if (die-ref spec 'name)
                     (intern-type die spec)
                     (recur* die)))))
@@ -376,7 +373,7 @@
       (else
        (recur* die))))
   (define (visit-type offset)
-    (recur (find-die-by-offset roots offset die)))
+    (recur (find-die-by-offset die offset)))
   (define (visit-attr attr val tail)
     (case attr
       ((decl-file decl-line sibling low-pc high-pc frame-base external
@@ -419,17 +416,41 @@
            (reverse (die-attrs die))
            (reverse (die-vals die))))))
 
+(define (ctx-namespace-name ctx)
+  (cond
+   ((ctx-die ctx)
+    => (lambda (die)
+         (case (die-tag die)
+           ((compile-unit) '())
+           (else
+            (cons (type-name die)
+                  (ctx-namespace-name (die-ctx die)))))))
+   (else '())))
+
 (define* (type-name die #:optional spec)
-  (list (case (die-tag die)
-          ((structure-type) 'struct)
-          ((union-type) 'union)
-          ((class-type) 'class)
-          ((typedef) 'typedef)
-          ((enumeration-type) 'enum)
-          (else (error "Don't know how to name" die)))
-        (or (die-ref die 'name)
-            (and spec (die-ref spec 'name))
-            (error "anonymous type should not get here"))))
+  (cond
+   ((die-ref die 'name)
+    => (lambda (name)
+         (cons* (case (die-tag die)
+                  ((structure-type) 'struct)
+                  ((union-type) 'union)
+                  ((class-type) 'class)
+                  ((typedef) 'typedef)
+                  ((enumeration-type) 'enum)
+                  (else (error "Don't know how to name" die)))
+                name
+                (ctx-namespace-name (die-ctx die)))))
+   ((and spec (die-ref spec 'name))
+    (type-name spec))
+   ((die-ref die 'specification)
+    => (lambda (offset)
+         (type-name (find-die-by-offset die offset))))
+   (else
+    (error "anonymous type should not get here" die))))
+
+(define (ctx-language ctx)
+  (or (and=> (ctx-die ctx) (cut die-ref <> 'language))
+      (and=> (ctx-parent ctx) ctx-language)))
 
 (define (extract-definitions ctx names)
   (let ((externs (make-hash-table))
@@ -443,16 +464,26 @@
           (let* ((name (type-name die spec)))
             (hashv-set! types-by-offset (die-offset die) name)
             (unless (die-ref die 'declaration)
-              (let ((decl (extract-declaration roots die intern-type)))
+              (let ((decl (extract-declaration die intern-type)))
                 (match (vhash-assoc name types-by-name)
                   ((name* . decl*)
                    (unless (equal? decl decl*)
+                     (pk decl)
+                     (pk decl*)
                      (error "two types with the same name but different decls"
                             decl decl*)))
                   (#f
                    (set! types-by-name (vhash-cons name decl types-by-name))))))
             name)))
     (define (find-externs die)
+      (define (skip? ctx offset abbrev)
+        (case (abbrev-tag abbrev)
+          ((subprogram variable) #f)
+          ;; For C++, descend into classes and structures so that we
+          ;; populate the context tree.
+          ((class-type structure-type)
+           (not (eq? (ctx-language ctx) 'C-plus-plus)))
+          (else #t)))
       (case (die-tag die)
         ((subprogram variable)
          (when (and (die-ref die 'external)
@@ -467,14 +498,14 @@
                    (error "Duplicate definition" name (cdr handle) die))
                   (else
                    (set-cdr! handle die))))))))
-        ((compile-unit)
+        ((compile-unit class-type structure-type)
+         ;; We only see class-type and structure-type if we are
+         ;; processing C++.
          (fold-die-children die
-                            (lambda (ctx offset abbrev)
-                              (case (abbrev-tag abbrev)
-                                ((subprogram variable) #f)
-                                (else #t)))
                             (lambda (die seed) (find-externs die))
-                            #f))))
+                            #f
+                            #:skip? skip?
+                            #:ctx (make-child-context die)))))
     (for-each prepare-extern names)
     (for-each find-externs roots)
     (let lp ((names names) (out '()))
@@ -484,7 +515,7 @@
           ((hash-ref externs name)
            => (lambda (die)
                 (lp names
-                    (cons (extract-declaration roots die intern-type)
+                    (cons (extract-declaration die intern-type)
                           out))))
           (else
            (format (current-error-port)
@@ -515,7 +546,8 @@
        ((pred die)
         (k die))
        ((recurse? die)
-        (fold-die-children die skip? (lambda (die seed) (visit-die die)) #f))
+        (fold-die-children die (lambda (die seed) (visit-die die)) #f
+                           #:skip? skip?))
        (else #f)))
     (for-each visit-die roots)
     #f))
@@ -526,7 +558,7 @@
       (define (recur y)
         (visit-die y (cons x seen)))
       (define (visit-type offset)
-        (recur (or (find-die-by-offset roots offset x)
+        (recur (or (find-die-by-offset x offset)
                    (error "what!"))))
       (define (visit-attr attr val tail)
         (case attr
