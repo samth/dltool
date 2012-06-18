@@ -325,30 +325,6 @@
                                 #:lib-path lib-path)
             lib-elf)))
 
-(define (find-die-context ctx offset)
-  (define (not-found)
-    (error "failed to find DIE by context" offset))
-  (define (in-context? ctx)
-    (and (<= (ctx-start ctx) offset)
-         (< offset (ctx-end ctx))))
-  (define (find-root ctx)
-    (if (in-context? ctx)
-        ctx
-        (find-root (or (ctx-parent ctx) (not-found)))))
-  (define (find-leaf ctx)
-    (let lp ((kids (ctx-children ctx)))
-      (match kids
-        (() ctx)
-        ((head . tail)
-         (if (in-context? head)
-             (find-leaf head)
-             (lp tail))))))
-  (find-leaf (find-root ctx)))
-
-(define* (find-die-by-offset current-die offset)
-  (or (read-die (find-die-context (die-ctx current-die) offset) offset)
-      (error "Failed to read DIE at offset" offset)))
-
 (define (extract-declaration die intern-type)
   (define (recur* die)
     (extract-declaration die intern-type))
@@ -446,10 +422,6 @@
    (else
     (error "anonymous type should not get here" die))))
 
-(define (ctx-language ctx)
-  (or (and=> (ctx-die ctx) (cut die-ref <> 'language))
-      (and=> (ctx-parent ctx) ctx-language)))
-
 ;; A new declaration is compatible with an previous one if it has the
 ;; same size as the previous one, and only differs in declarations of
 ;; members that occupy no space, neither in the vtable nor in the
@@ -540,8 +512,7 @@
          (fold-die-children die
                             (lambda (die seed) (find-externs die))
                             #f
-                            #:skip? skip?
-                            #:ctx (make-child-context die)))))
+                            #:skip? skip?))))
     (for-each prepare-extern names)
     (for-each find-externs roots)
     (let lp ((names names) (out '()))
@@ -622,5 +593,8 @@
                      #:recurse? (lambda (die)
                                   (case (die-tag die)
                                     ((compile-unit) #t)
+                                    ((structure-type class-type)
+                                     (eq? (ctx-language (die-ctx die))
+                                          'C-plus-plus))
                                     (else #f))))
            (cut visit-die <> '()))))

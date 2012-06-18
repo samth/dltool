@@ -44,9 +44,9 @@
             die? die-ctx die-offset die-abbrev die-vals die-children
             die-tag die-attrs die-forms die-ref
 
-            ctx-parent ctx-die ctx-start ctx-end ctx-children
-            make-child-context
+            ctx-parent ctx-die ctx-start ctx-end ctx-children ctx-language
 
+            find-die-context find-die-by-offset
             read-die fold-die-list
 
             fold-die-children die->tree))
@@ -1166,24 +1166,47 @@
       (lambda (seed pos)
         pos)))))
 
+(define (find-die-context ctx offset)
+  (define (not-found)
+    (error "failed to find DIE by context" offset))
+  (define (in-context? ctx)
+    (and (<= (ctx-start ctx) offset)
+         (< offset (ctx-end ctx))))
+  (define (find-root ctx)
+    (if (in-context? ctx)
+        ctx
+        (find-root (or (ctx-parent ctx) (not-found)))))
+  (define (find-leaf ctx)
+    (let lp ((kids (ctx-children ctx)))
+      (if (null? kids)
+          ctx
+          (if (in-context? (car kids))
+              (find-leaf (car kids))
+              (lp (cdr kids))))))
+  (find-leaf (find-root ctx)))
+
+(define (find-die-by-offset current-die offset)
+  (or (read-die (find-die-context (die-ctx current-die) offset) offset)
+      (error "Failed to read DIE at offset" offset)))
+
 (define (fold-die-list ctx offset skip? proc seed)
-  (let lp ((offset offset) (seed seed))
-    (let-values (((abbrev pos) (read-die-abbrev ctx offset)))
-      (cond
-       ((not abbrev) (values seed pos))
-       ((skip? ctx offset abbrev)
-        (lp (die-sibling ctx abbrev offset pos) seed))
-       (else
-        (let-values (((vals pos) (read-values ctx pos abbrev)))
-          (let* ((die (make-die ctx offset abbrev vals))
-                 (seed (proc die seed)))
-            (lp (die-sibling ctx abbrev offset #f pos) seed))))))))
+  (let ((ctx (find-die-context ctx offset)))
+    (let lp ((offset offset) (seed seed))
+      (let-values (((abbrev pos) (read-die-abbrev ctx offset)))
+        (cond
+         ((not abbrev) (values seed pos))
+         ((skip? ctx offset abbrev)
+          (lp (die-sibling ctx abbrev offset pos) seed))
+         (else
+          (let-values (((vals pos) (read-values ctx pos abbrev)))
+            (let* ((die (make-die ctx offset abbrev vals))
+                   (seed (proc die seed)))
+              (lp (die-sibling ctx abbrev offset #f pos) seed)))))))))
 
 (define* (fold-die-children die proc seed #:key
-                            (skip? (lambda (ctx offset abbrev) #f))
-                            (ctx (die-ctx die)))
+                            (skip? (lambda (ctx offset abbrev) #f)))
   (if (abbrev-has-children? (die-abbrev die))
-      (values (fold-die-list ctx (die-next-offset die)
+      (values (fold-die-list (die-ctx die) (die-next-offset die)
                              skip? proc seed))
       seed))
 
@@ -1215,6 +1238,28 @@
                          (die-sibling ctx (die-abbrev die) (die-offset die))
                          '()))))
 
+(define (ctx-language ctx)
+  (or (and=> (ctx-die ctx) (lambda (x) (die-ref x 'language)))
+      (and=> (ctx-parent ctx) ctx-language)))
+
+(define (populate-context-tree! die)
+  (define (skip? ctx offset abbrev)
+    (case (abbrev-tag abbrev)
+      ((class-type structure-type) #t)
+      (else #t)))
+  (case (die-tag die)
+    ((compile-unit class-type structure-type)
+     (let ((ctx (make-child-context die)))
+       ;; For C++, descend into classes and structures so that we
+       ;; populate the context tree.  Note that for compile-unit, we
+       ;; still need to call `make-child-context' for its side effect of
+       ;; adding to the context tree.
+       (when (eq? (ctx-language ctx) 'C-plus-plus)
+         (fold-die-children die
+                            (lambda (die seed) (populate-context-tree! die))
+                            #f
+                            #:skip? skip?))))))
+
 (define (read-compilation-unit ctx pos)
   (let*-values (((start) pos)
                 ((len pos) (read-u32 ctx pos))
@@ -1222,9 +1267,10 @@
                 ((abbrevs-offset pos) (read-u32 ctx pos))
                 ((av) (read-abbrevs ctx abbrevs-offset))
                 ((addrsize pos) (read-u8 ctx pos))
-                ((ctx) (make-compilation-unit-context ctx av start len)))
-    (values (read-die ctx pos)
-            (ctx-end ctx))))
+                ((ctx) (make-compilation-unit-context ctx av start len))
+                ((die) (read-die ctx pos)))
+    (populate-context-tree! die)
+    (values die (ctx-end ctx))))
 
 (define (read-die-roots ctx)
   (let lp ((dies '()) (pos (meta-info-start (ctx-meta ctx))))
