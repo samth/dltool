@@ -341,7 +341,7 @@
          (intern-type die))
         ((die-ref die 'specification)
          => (lambda (offset)
-              (let ((spec (find-die-by-offset die offset)))
+              (let ((spec (find-die-by-offset (die-ctx die) offset)))
                 (if (die-ref spec 'name)
                     (intern-type die spec)
                     (recur* die)))))
@@ -350,7 +350,7 @@
       (else
        (recur* die))))
   (define (visit-type offset)
-    (recur (find-die-by-offset die offset)))
+    (recur (find-die-by-offset (die-ctx die) offset)))
   (define (visit-attr attr val tail)
     (case attr
       ((decl-file decl-line sibling low-pc high-pc frame-base external
@@ -418,7 +418,7 @@
     (type-name spec))
    ((die-ref die 'specification)
     => (lambda (offset)
-         (type-name (find-die-by-offset die offset))))
+         (type-name (find-die-by-offset (die-ctx die) offset))))
    (else
     (error "anonymous type should not get here" die))))
 
@@ -461,7 +461,7 @@
       (compatible-subset? previous-decl decl)
       (compatible-subset? decl previous-decl)))
 
-(define (extract-definitions ctx names)
+(define* (extract-definitions ctx names #:optional addresses)
   (let ((externs (make-hash-table))
         (types-by-offset (make-hash-table))
         (types-by-name vlist-null)
@@ -483,38 +483,21 @@
                   (#f
                    (set! types-by-name (vhash-cons name decl types-by-name))))))
             name)))
-    (define (find-externs die)
-      (define (skip? ctx offset abbrev)
-        (case (abbrev-tag abbrev)
-          ((subprogram variable) #f)
-          ;; For C++, descend into classes and structures so that we
-          ;; populate the context tree.
-          ((class-type structure-type)
-           (not (eq? (ctx-language ctx) 'C-plus-plus)))
-          (else #t)))
-      (case (die-tag die)
-        ((subprogram variable)
-         (when (and (die-ref die 'external)
-                    (not (die-ref die 'declaration))
-                    (not (die-ref die 'inline)))
-           (let ((name (die-ref die 'name)))
-             (when name
-               (let ((handle (hash-get-handle externs name)))
-                 (cond
-                  ((not handle))
-                  ((cdr handle)
-                   (error "Duplicate definition" name (cdr handle) die))
-                  (else
-                   (set-cdr! handle die))))))))
-        ((compile-unit class-type structure-type)
-         ;; We only see class-type and structure-type if we are
-         ;; processing C++.
-         (fold-die-children die
-                            (lambda (die seed) (find-externs die))
-                            #f
-                            #:skip? skip?))))
+    (define (find-pubnames name offset seed)
+      (let ((handle (hash-get-handle externs name)))
+        (cond
+         ((not handle))
+         ((cdr handle)
+          (error "Duplicate definition" name (cdr handle) offset))
+         (else
+          (set-cdr! handle (find-die-by-offset ctx offset))))))
     (for-each prepare-extern names)
-    (for-each find-externs roots)
+    (if addresses
+        (for-each (lambda (name address)
+                    (and=> (find-die-by-pc roots address)
+                           (cut hash-set! externs name <>)))
+                  names addresses)
+        (fold-pubnames ctx find-pubnames #f))
     (let lp ((names names) (out '()))
       (match names
         ((name . names)
@@ -522,8 +505,13 @@
           ((hash-ref externs name)
            => (lambda (die)
                 (lp names
-                    (cons (extract-declaration die intern-type)
-                          out))))
+                    (let ((decl (extract-declaration die intern-type)))
+                      (cons (if (equal? (die-ref die 'name) name)
+                                decl
+                                (cons* (car decl)
+                                       (list 'public-name name)
+                                       (cdr decl)))
+                            out)))))
           (else
            (format (current-error-port)
                    "warning: no debug information for symbol: ~a\n"
@@ -535,37 +523,13 @@
                      (reverse out)
                      types-by-name))))))
 
-(define-syntax-rule (let/ec k e e* ...)
-  (let ((tag (make-prompt-tag)))
-    (call-with-prompt
-     tag
-     (lambda ()
-       (let ((k (lambda args (apply abort-to-prompt tag args))))
-         e e* ...))
-     (lambda (_ res) res))))
-
-(define* (find-die roots pred #:key
-                   (skip? (lambda (ctx offset abbrev) #f))
-                   (recurse? (lambda (die) #t)))
-  (let/ec k
-    (define (visit-die die)
-      (cond
-       ((pred die)
-        (k die))
-       ((recurse? die)
-        (fold-die-children die (lambda (die seed) (visit-die die)) #f
-                           #:skip? skip?))
-       (else #f)))
-    (for-each visit-die roots)
-    #f))
-
 (define* (extract-one-definition ctx pred #:optional (depth 1))
   (let ((roots (read-die-roots ctx)))
     (define* (visit-die x seen)
       (define (recur y)
         (visit-die y (cons x seen)))
       (define (visit-type offset)
-        (recur (or (find-die-by-offset x offset)
+        (recur (or (find-die-by-offset (die-ctx x) offset)
                    (error "what!"))))
       (define (visit-attr attr val tail)
         (case attr

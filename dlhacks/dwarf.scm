@@ -38,6 +38,7 @@
   #:use-module (srfi srfi-11)
   #:export (elf->dwarf-context
             read-die-roots
+            fold-pubnames fold-aranges
 
             abbrev? abbrev-tag abbrev-has-children? abbrev-attrs abbrev-forms
 
@@ -46,7 +47,7 @@
 
             ctx-parent ctx-die ctx-start ctx-end ctx-children ctx-language
 
-            find-die-context find-die-by-offset
+            find-die-context find-die-by-offset find-die find-die-by-pc
             read-die fold-die-list
 
             fold-die-children die->tree))
@@ -626,7 +627,9 @@
                    info-start info-end
                    abbrevs-start abbrevs-end
                    strtab-start strtab-end
-                   loc-start loc-end)
+                   loc-start loc-end
+                   pubnames-start pubnames-end
+                   aranges-start aranges-end)
   dwarf-meta?
   (vaddr meta-vaddr)
   (memsz meta-memsz)
@@ -639,7 +642,11 @@
   (strtab-start meta-strtab-start)
   (strtab-end meta-strtab-end)
   (loc-start meta-loc-start)
-  (loc-end meta-loc-end))
+  (loc-end meta-loc-end)
+  (pubnames-start meta-pubnames-start)
+  (pubnames-end meta-pubnames-end)
+  (aranges-start meta-aranges-start)
+  (aranges-end meta-aranges-end))
 
 (define-record-type <dwarf-context>
   (make-dwarf-context bv word-size endianness meta
@@ -1185,9 +1192,53 @@
               (lp (cdr kids))))))
   (find-leaf (find-root ctx)))
 
-(define (find-die-by-offset current-die offset)
-  (or (read-die (find-die-context (die-ctx current-die) offset) offset)
+(define (find-die-by-offset ctx offset)
+  (or (read-die (find-die-context ctx offset) offset)
       (error "Failed to read DIE at offset" offset)))
+
+(define-syntax-rule (let/ec k e e* ...)
+  (let ((tag (make-prompt-tag)))
+    (call-with-prompt
+     tag
+     (lambda ()
+       (let ((k (lambda args (apply abort-to-prompt tag args))))
+         e e* ...))
+     (lambda (_ res) res))))
+
+(define* (find-die roots pred #:key
+                   (skip? (lambda (ctx offset abbrev) #f))
+                   (recurse? (lambda (die) #t)))
+  (let/ec k
+    (define (visit-die die)
+      (cond
+       ((pred die)
+        (k die))
+       ((recurse? die)
+        (fold-die-children die (lambda (die seed) (visit-die die)) #f
+                           #:skip? skip?))
+       (else #f)))
+    (for-each visit-die roots)
+    #f))
+
+(define (find-die-by-pc roots pc)
+  ;; The result will be a subprogram.
+  (define (skip? ctx offset abbrev)
+    (case (abbrev-tag abbrev)
+      ((subprogram compile-unit) #f)
+      (else #t)))
+  (define (recurse? die)
+    (case (die-tag die)
+      ((compile-unit)
+       (not (or (and=> (die-ref die 'low-pc)
+                       (lambda (low) (< pc low)))
+                (and=> (die-ref die 'high-pc)
+                       (lambda (high) (<= high pc))))))
+      (else #f)))
+  (find-die roots
+            (lambda (die)
+              (and (eq? (die-tag die) 'subprogram)
+                   (equal? (die-ref die 'low-pc) pc)))
+            #:skip? skip? #:recurse? recurse?))
 
 (define (fold-die-list ctx offset skip? proc seed)
   (let ((ctx (find-die-context ctx offset)))
@@ -1281,13 +1332,70 @@
               (reverse dies)))
         (reverse dies))))
 
+(define (fold-pubname-set ctx pos folder seed)
+  (let*-values (((len pos) (read-u32 ctx pos))
+                ((version pos) (read-u16 ctx pos))
+                ((info-offset pos) (read-u32 ctx pos))
+                ((info-offset) (+ info-offset
+                                  (meta-info-start (ctx-meta ctx))))
+                ((info-len pos) (read-u32 ctx pos)))
+    (let lp ((pos pos) (seed seed))
+      (let-values (((offset pos) (read-u32 ctx pos)))
+        (if (zero? offset)
+            (values seed pos)
+            (let-values (((str pos) (read-string ctx pos)))
+              (lp pos
+                  (folder str (+ offset info-offset) seed))))))))
+
+(define (fold-pubnames ctx folder seed)
+  (let ((end (meta-pubnames-end (ctx-meta ctx))))
+    (if end
+        (let lp ((pos (meta-pubnames-start (ctx-meta ctx))) (seed seed))
+          (if (< pos end)
+              (let-values (((seed pos) (fold-pubname-set ctx pos folder seed)))
+                (lp pos seed))
+              seed))
+        seed)))
+
+(define (align address alignment)
+  (+ address
+     (modulo (- alignment (modulo address alignment)) alignment)))
+
+(define (fold-arange-set ctx pos folder seed)
+  (let*-values (((len pos) (read-u32 ctx pos))
+                ((version pos) (read-u16 ctx pos))
+                ((info-offset pos) (read-u32 ctx pos))
+                ((info-offset) (+ info-offset
+                                  (meta-info-start (ctx-meta ctx))))
+                ((addr-size pos) (read-u8 ctx pos))
+                ((segment-size pos) (read-u8 ctx pos)))
+    (let lp ((pos (align pos (* 2 (ctx-word-size ctx)))) (seed seed))
+      (let*-values (((addr pos) (read-addr ctx pos))
+                    ((len pos) (read-addr ctx pos)))
+        (if (and (zero? addr) (zero? len))
+            (values seed pos)
+            (lp pos
+                (folder info-offset addr len seed)))))))
+
+(define (fold-aranges ctx folder seed)
+  (let ((end (meta-aranges-end (ctx-meta ctx))))
+    (if end
+        (let lp ((pos (meta-aranges-start (ctx-meta ctx))) (seed seed))
+          (if (< pos end)
+              (let-values (((seed pos) (fold-arange-set ctx pos folder seed)))
+                (lp pos seed))
+              seed))
+        seed)))
+
 (define* (elf->dwarf-context elf #:key (vaddr 0) (memsz 0)
                              (path #f) (lib-path path))
   (let* ((sections (elf-sections-by-name elf))
          (info (assoc-ref sections ".debug_info"))
          (abbrevs (assoc-ref sections ".debug_abbrev"))
          (strtab (assoc-ref sections ".debug_str"))
-         (loc (assoc-ref sections ".debug_loc")))
+         (loc (assoc-ref sections ".debug_loc"))
+         (pubnames (assoc-ref sections ".debug_pubnames"))
+         (aranges (assoc-ref sections ".debug_aranges")))
     (make-dwarf-context (elf-bytes elf)
                         (elf-word-size elf)
                         (elf-byte-order elf)
@@ -1305,7 +1413,17 @@
                             (elf-section-size strtab))
                          (elf-section-offset loc)
                          (+ (elf-section-offset loc)
-                            (elf-section-size loc)))
+                            (elf-section-size loc))
+                         (and pubnames
+                              (elf-section-offset pubnames))
+                         (and pubnames
+                              (+ (elf-section-offset pubnames)
+                                 (elf-section-size pubnames)))
+                         (and aranges
+                              (elf-section-offset aranges))
+                         (and aranges
+                              (+ (elf-section-offset aranges)
+                                 (elf-section-size aranges))))
                         #() #f #f
                         (elf-section-offset info)
                         (+ (elf-section-offset info)

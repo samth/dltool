@@ -137,8 +137,9 @@ separate debug objects, if needed.
                                 #:url "https://gitorious.org/guile-dlhacks/"))))
 
 (define (all-exports lib-elf)
-  (sort (map elf-symbol-name (extract-exported-symbols lib-elf))
-        string<?))
+  (sort (extract-exported-symbols lib-elf)
+        (lambda (a b)
+          (string<? (elf-symbol-name a) (elf-symbol-name b)))))
 
 (define (load-die-roots lib)
   (read-die-roots (load-dwarf-context lib)))
@@ -152,14 +153,30 @@ symbols are printed on the console, preceded by declararations of the
 types that they use.  Otherwise, declarations for all exported symbols
 are printed.
 "
-  (for-each pretty-print
-            (call-with-values (lambda ()
-                                (load-dwarf-context lib))
-              (lambda (ctx lib-elf)
-                (extract-definitions ctx
-                                     (if (null? syms)
-                                         (all-exports lib-elf)
-                                         syms))))))
+  (for-each
+   pretty-print
+   (call-with-values (lambda () (load-dwarf-context lib))
+     (lambda (ctx lib-elf)
+       (if (null? syms)
+           (let ((syms (all-exports lib-elf)))
+             (extract-definitions ctx (map elf-symbol-name syms)
+                                  (map elf-symbol-value syms)))
+           (extract-definitions ctx syms))))))
+
+(define-command ((list-exports) options lib)
+  "list-exports LIB
+Print a list of exported symbols.
+"
+  (for-each
+   (lambda (sym)
+     (pretty-print sym))
+   (all-exports
+    (parse-elf (call-with-input-file
+                   (if (string-index lib #\/)
+                       lib
+                       (or (find-library lib)
+                           (error "Failed to find library" lib)))
+                 get-bytevector-all)))))
 
 (define-command ((dump) options lib)
   "dump LIB
