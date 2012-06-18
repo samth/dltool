@@ -455,7 +455,7 @@
              ;; Classes and structures are compatible.  In fact in some
              ;; cases, you will see DWARF declarations for "struct foo;"
              ;; with `structure-type' followed by a `class-type'
-             ;; corresponding to a "struct foo : public bar" definition.
+             ;; corresponding to a "struct foo : bar" definition.
              (and (memq sub '(class-type structure-type))
                   (memq super '(class-type structure-type)))
              (and (string? sub) (string? super)
