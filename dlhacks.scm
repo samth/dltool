@@ -35,6 +35,7 @@
   #:use-module (ice-9 binary-ports)
   #:use-module (ice-9 vlist)
   #:use-module ((ice-9 i18n) #:select (string-locale<?))
+  #:autoload (ice-9 pretty-print) (pretty-print)
   #:use-module (rnrs bytevectors)
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-11)
@@ -379,7 +380,7 @@
       ((decl-file decl-line sibling low-pc high-pc frame-base external
         location)
        tail)
-      ((type containing-type specification)
+      ((type containing-type specification object-pointer import)
        (cons (list attr (visit-type val)) tail))
       (else
        (cons (list attr val) tail))))
@@ -404,7 +405,9 @@
                            (append formals (list (recur varargs)))
                            formals)))))
              ((structure-type union-type class-type)
-              (list (cons 'members (map recur kids))))
+              (list (cons 'members
+                          (map recur
+                               (filter (has-tag? 'member) kids)))))
              ((enumeration-type)
               (list (cons 'literals (map recur kids))))
              ((array-type)
@@ -431,15 +434,10 @@
   (cond
    ((die-ref die 'name)
     => (lambda (name)
-         (cons* (case (die-tag die)
-                  ((structure-type) 'struct)
-                  ((union-type) 'union)
-                  ((class-type) 'class)
-                  ((typedef) 'typedef)
-                  ((enumeration-type) 'enum)
-                  (else (error "Don't know how to name" die)))
-                name
-                (ctx-namespace-name (die-ctx die)))))
+         (list 'named-type-reference
+               (cons* (die-tag die)
+                      name
+                      (ctx-namespace-name (die-ctx die))))))
    ((and spec (die-ref spec 'name))
     (type-name spec))
    ((die-ref die 'specification)
@@ -451,6 +449,45 @@
 (define (ctx-language ctx)
   (or (and=> (ctx-die ctx) (cut die-ref <> 'language))
       (and=> (ctx-parent ctx) ctx-language)))
+
+;; A new declaration is compatible with an previous one if it has the
+;; same size as the previous one, and only differs in declarations of
+;; members that occupy no space, neither in the vtable nor in the
+;; instance.
+(define (compatible-declarations? die decl previous-decl)
+  (define (elidable? elt)
+    (match elt
+      (('subprogram . attrs)
+       (not (assoc 'virtuality attrs)))
+      (_ #f)))
+  ;; A "subset" has fewer decls than a "superset".
+  (define (compatible-subset? sub super)
+    (match sub
+      ((sub-head . sub-tail)
+       (match super
+         ((super-head . super-tail)
+          (if (or (equal? sub-head super-head)
+                  (compatible-subset? sub-head super-head))
+              (compatible-subset? sub-tail super-tail)
+              (and (elidable? super-head)
+                   (compatible-subset? sub super-tail))))
+         (_ #f)))
+      (()
+       (match super
+         ((super-head . super-tail)
+          (and (elidable? super-head)
+               (compatible-subset? sub super-tail)))
+         (() #t)))
+      (_ (or (equal? sub super)
+             ;; Classes and structures are compatible.  In fact in some
+             ;; cases, you will see DWARF declarations for "struct foo;"
+             ;; with `structure-type' followed by a `class-type'
+             ;; corresponding to a "struct foo : public bar" definition.
+             (and (memq sub '(class-type structure-type))
+                  (memq super '(class-type structure-type)))))))
+  (or (equal? decl previous-decl)
+      (compatible-subset? previous-decl decl)
+      (compatible-subset? decl previous-decl)))
 
 (define (extract-definitions ctx names)
   (let ((externs (make-hash-table))
@@ -467,11 +504,10 @@
               (let ((decl (extract-declaration die intern-type)))
                 (match (vhash-assoc name types-by-name)
                   ((name* . decl*)
-                   (unless (equal? decl decl*)
-                     (pk decl)
-                     (pk decl*)
-                     (error "two types with the same name but different decls"
-                            decl decl*)))
+                   (unless (compatible-declarations? die decl decl*)
+                     (pretty-print decl (current-error-port))
+                     (pretty-print decl* (current-error-port))
+                     (error "two types with the same name but incompatible decls" name)))
                   (#f
                    (set! types-by-name (vhash-cons name decl types-by-name))))))
             name)))
@@ -565,7 +601,7 @@
           ((decl-file decl-line sibling low-pc high-pc frame-base
                       external location)
            tail)
-          ((type containing-type specification)
+          ((type containing-type specification object-pointer import)
            (cons (list attr (visit-type val)) tail))
           (else
            (cons (list attr val) tail))))
