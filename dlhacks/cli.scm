@@ -38,15 +38,15 @@
     (debug)))
 
 (define (display-version)
-  (version-etc "dlhacks"
+  (version-etc "dltool"
                "0.1.0"
                #:copyright-year 2012
                #:copyright-holder "Andy Wingo <wingo@igalia.com>"
-               #:command-name "dlhacks"
+               #:command-name "dltool"
                #:license *LGPLv3+*))
 
 (define* (display-usage #:optional (port (current-output-port)))
-  (display "Usage: dlhacks [--help] [--version] COMMAND ARG...\n" port))
+  (display "Usage: dltool [--help] [--version] COMMAND ARG...\n" port))
 
 (define-record-type <command>
   (make-command name grammar docstring handler)
@@ -76,7 +76,7 @@
                 ((options . unrecognized)
                  (format (current-error-port) "Unexpected arguments: ~a\n"
                          unrecognized)
-                 (format (current-error-port) "Usage: dlhacks ~a\n"
+                 (format (current-error-port) "Usage: dltool ~a\n"
                          (car (string-split docstring #\newline)))
                  (exit 1))))
               *commands*)))
@@ -88,7 +88,7 @@
       (display-usage)
       (newline)
       (display "For more information and a list of available commands,\n")
-      (display "try `dlhacks help'.\n")))
+      (display "try `dltool help'.\n")))
   (exit 1))
 
 (define-command ((help) options #:optional command)
@@ -101,30 +101,30 @@ Display a general help message, or help for a particular command.
     (cond
      ((find-command command)
       => (lambda (c)
-           (display "Usage: dlhacks ")
+           (display "Usage: dltool ")
            (display (command-docstring c))))
      (else
       (unrecognized-command command))))
    (else
     (display-usage)
-    (display "A toolkit for extracting information out of ELF shared libraries.
+    (display "A tool for extracting information out of ELF shared libraries.
 
 Available commands:
 
 ")
     (for-each (lambda (c)
-                (format #t "    dlhacks ~a\n"
+                (format #t "    dltool ~a\n"
                         (car (string-split (command-docstring c) #\newline))))
               (sort *commands*
                     (lambda (x y)
                       (string<? (command-name x) (command-name y)))))
     (display "
-Try `dlhacks help COMMAND' for help on particular commands.
+Try `dltool help COMMAND' for help on particular commands.
 
 Many commands take library names as arguments.  In that case, if the
-path is a bare file name, without a slash, it is searched for in the
-load path.  The load path is found by parsing the /etc/ld.so.conf file
-and the LD_LIBRARY_PATH environment variable.
+path is a bare file name without a slash, it is searched for in the load
+path.  The load path is found by parsing the /etc/ld.so.conf file and
+the LD_LIBRARY_PATH environment variable.
 
 Some commands also try to locate debugging information for a library,
 which may be in a separate file.  Many GNU/Linux distributions strip the
@@ -132,8 +132,11 @@ debugging information out their libraries, and instead offer that
 information in separate \"-dbg\" packages.  In that case, the loadable
 .so file has a link to the separate debug object.  This tool will load
 separate debug objects, if needed.
+
+Note that dltool does not yet support compressed debug
+sections (e.g. \".zdebug_info\"), as used by some distributions.
 ")
-    (emit-bug-reporting-address "dlhacks" "wingo@igalia.com"
+    (emit-bug-reporting-address "dltool" "wingo@igalia.com"
                                 #:url "https://gitorious.org/guile-dlhacks/"))))
 
 (define (all-exports lib-elf)

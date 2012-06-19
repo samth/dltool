@@ -29,6 +29,6 @@ TESTS = 					\
 	tests/basic.test
 TESTS_ENVIRONMENT = $(abs_top_builddir)/env $(GUILE) --no-auto-compile
 
-bin_SCRIPTS = bin/dlhacks
+bin_SCRIPTS = bin/dltool
 
 EXTRA_DIST = $(SOURCES) $(NOCOMP_SOURCES) $(TESTS) $(bin_SCRIPTS)
