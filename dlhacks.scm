@@ -49,6 +49,8 @@
             empty-declaration?
             extract-exported-symbols
             extract-definitions
+            resolve-symbols
+            find-one-definition
             extract-one-definition))
 
 (define global-debug-path
@@ -334,20 +336,20 @@
      (not (die-ref die 'byte-size)))
     (else #f)))
 
-(define (extract-declaration die intern-type)
+(define (extract-declaration die visit-named-definition visit-children)
   (define (recur* die)
-    (extract-declaration die intern-type))
+    (extract-declaration die visit-named-definition visit-children))
   (define (recur die)
     (case (die-tag die)
       ((typedef)
        ;; Typedefs without types are declarations.
        (if (die-ref die 'type)
-           (intern-type die)
+           (visit-named-definition die)
            (type-name die)))
       ((structure-type union-type enumeration-type class-type)
        (cond
         ((die-name die)
-         (intern-type die))
+         (visit-named-definition die))
         (else
          (recur* die))))
       (else
@@ -357,47 +359,18 @@
   (define (visit-attr attr val tail)
     (case attr
       ((decl-file decl-line sibling low-pc high-pc frame-base external
-        location linkage-name)
+                  location linkage-name)
        tail)
       ((type containing-type specification object-pointer import)
        (cons (list attr (visit-type val)) tail))
       (else
        (cons (list attr val) tail))))
-  (define (has-tag? tag)
-    (lambda (x) (eq? (die-tag x) tag)))
-
-  (let ((tag (die-tag die))
-        (kids (die-children die)))
-    (cons tag
-          (fold
-           visit-attr
-           (case tag
-             ((subprogram subroutine-type)
-              (let ((formals (map recur
-                                  (filter (has-tag? 'formal-parameter)
-                                          kids)))
-                    (varargs (find (has-tag? 'unspecified-parameters)
-                                   kids)))
-                (list
-                 (cons 'args
-                       (if varargs
-                           (append formals (list (recur varargs)))
-                           formals)))))
-             ((structure-type union-type class-type)
-              (list (cons 'members
-                          (map recur
-                               (filter (has-tag? 'member) kids)))))
-             ((enumeration-type)
-              (list (cons 'literals (map recur kids))))
-             ((array-type)
-              (map recur kids))
-             (else
-              (unless (null? kids)
-                (error "unexpected children" die))
-              '()))
-           (reverse (die-attrs die))
-           (reverse (die-vals die))))))
-
+  (cons (die-tag die)
+        (fold
+         visit-attr
+         (visit-children die)
+         (reverse (die-attrs die))
+         (reverse (die-vals die)))))
 
 (define (type-name die)
   (define (type-name* die)
@@ -471,19 +444,17 @@
       (compatible-subset? previous-decl decl)
       (compatible-subset? decl previous-decl)))
 
-(define* (extract-definitions ctx names #:optional addresses)
-  (let ((externs (make-hash-table))
-        (types-by-offset (make-hash-table))
-        (types-by-name vlist-null)
-        (roots (read-die-roots ctx)))
-    (define (prepare-extern name)
-      (hash-set! externs name #f))
-    (define* (intern-type die)
+(define* (extract-definitions name-die-pairs)
+  (let ((types-by-offset (make-hash-table))
+        (types-by-name vlist-null))
+    (define (recurse die)
+      (extract-declaration die intern-type visit-children))
+    (define (intern-type die)
       (or (hashv-ref types-by-offset (die-offset die))
           (let* ((name (type-name die)))
             (hashv-set! types-by-offset (die-offset die) name)
             (unless (empty-declaration? die)
-              (let ((decl (extract-declaration die intern-type)))
+              (let ((decl (recurse die)))
                 (match (vhash-assoc name types-by-name)
                   ((name* . decl*)
                    (unless (compatible-declarations? die decl decl*)
@@ -493,7 +464,84 @@
                   (#f
                    (set! types-by-name (vhash-cons name decl types-by-name))))))
             name)))
-    (define (find-pubnames name offset seed)
+    (define (visit-children die)
+      (define (has-tag? tag)
+        (lambda (x) (eq? (die-tag x) tag)))
+      (let ((kids (die-children die)))
+        (case (die-tag die)
+          ((structure-type union-type class-type)
+           (map recurse (filter (has-tag? 'member) kids)))
+          ((subprogram)
+           (map recurse
+                (filter (lambda (x)
+                          (case (die-tag x)
+                            ((formal-parameter unspecified-parameters) #t)
+                            (else #f)))
+                        kids)))
+          (else
+           (map recurse kids)))))
+    (vhash-fold
+     (lambda (name decl tail)
+       (cons decl tail))
+     (map (lambda (pair)
+            (let* ((name (car pair))
+                   (die (cdr pair))
+                   (decl (recurse die)))
+              (if (equal? (die-name die) name)
+                  decl
+                  (cons* (car decl) (list 'public-name name) (cdr decl)))))
+          name-die-pairs)
+     types-by-name)))
+
+(define* (resolve-symbols ctx syms not-found)
+  (let ((externs (make-hash-table))
+        (roots (read-die-roots ctx))
+        (by-pc (make-hash-table))
+        (by-location (make-hash-table)))
+    (define (prepare-sym sym)
+      (let ((name (elf-symbol-name sym))
+            (value (elf-symbol-value sym)))
+        (hash-set! externs name #f)
+        (cond
+         ((= (elf-symbol-type sym) STT_FUNC)
+          (hashv-set! by-pc value name))
+         ((= (elf-symbol-type sym) STT_OBJECT)
+          (hashv-set! by-location value name)))))
+    (define (skip? ctx offset abbrev)
+      (case (abbrev-tag abbrev)
+        ((subprogram variable) #f)
+        (else #t)))
+    (define (visit-die die seed)
+      (case (die-tag die)
+        ((subprogram)
+         (and=> (hashv-ref by-pc (die-ref die 'low-pc))
+                (lambda (name)
+                  (hash-set! externs name die))))
+        ((variable)
+         (match (die-ref die 'location)
+           ((('addr addr))
+            (and=> (hashv-ref by-location addr)
+                   (lambda (name)
+                     (hash-set! externs name die))))
+           (_ #f)))))
+    (for-each prepare-sym syms)
+    (for-each (cut fold-die-children <> visit-die #f #:skip? skip?)
+              roots)
+    (let lp ((names (map elf-symbol-name syms)) (out '()))
+      (match names
+        ((name . names)
+         (cond
+          ((hash-ref externs name)
+           => (lambda (die)
+                (lp names (acons name die out))))
+          (else
+           (not-found name)
+           (lp names out))))
+        (()
+         (reverse out))))))
+
+#;
+(define (find-pubnames name offset seed)
       (let ((handle (hash-get-handle externs name)))
         (cond
          ((not handle))
@@ -501,84 +549,42 @@
           (error "Duplicate definition" name (cdr handle) offset))
          (else
           (set-cdr! handle (find-die-by-offset ctx offset))))))
-    (for-each prepare-extern names)
-    (if addresses
-        (let ((by-pc (make-hash-table)))
-          ;; The result will be a subprogram.
-          (define (skip? ctx offset abbrev)
-            (case (abbrev-tag abbrev)
-              ((subprogram) #f)
-              (else #t)))
-          (define (visit-die die seed)
-            (and=> (hashv-ref by-pc (die-ref die 'low-pc))
-                   (lambda (name)
-                     (hash-set! externs name die))))
-          (for-each (cut hashv-set! by-pc <> <>)
-                    addresses names)
-          (for-each (cut fold-die-children <> visit-die #f #:skip? skip?)
-                    roots))
-        (fold-pubnames ctx find-pubnames #f))
-    (let lp ((names names) (out '()))
-      (match names
-        ((name . names)
-         (cond
-          ((hash-ref externs name)
-           => (lambda (die)
-                (lp names
-                    (let ((decl (extract-declaration die intern-type)))
-                      (cons (if (equal? (die-name die) name)
-                                decl
-                                (cons* (car decl)
-                                       (list 'public-name name)
-                                       (cdr decl)))
-                            out)))))
-          (else
-           (format (current-error-port)
-                   "warning: no debug information for symbol: ~a\n"
-                   name)
-           (lp names out))))
-        (()
-         (vhash-fold (lambda (name decl tail)
-                       (cons decl tail))
-                     (reverse out)
-                     types-by-name))))))
+#;
+(fold-pubnames ctx find-pubnames #f)
 
-(define* (extract-one-definition ctx pred #:optional (depth 1))
-  (let ((roots (read-die-roots ctx)))
-    (define* (visit-die x seen)
-      (define (recur y)
-        (visit-die y (cons x seen)))
-      (define (visit-type offset)
-        (recur (or (find-die-by-offset (die-ctx x) offset)
-                   (error "what!"))))
-      (define (visit-attr attr val tail)
-        (case attr
-          ((decl-file decl-line sibling low-pc high-pc frame-base
-                      external location linkage-name)
-           tail)
-          ((type containing-type specification object-pointer import)
-           (cons (list attr (visit-type val)) tail))
-          (else
-           (cons (list attr val) tail))))
-      (if (and (or (< depth (length seen))
-                   (find (lambda (y) (equal? (die-offset y) (die-offset x)))
-                         seen))
-               (memq (die-tag x)
-                     '(structure-type union-type class-type typedef
-                                      enumeration-type))
-               (die-name x))
-          (type-name x)
-          (cons (die-tag x)
-                (fold visit-attr
-                      (map recur (die-children x))
-                      (reverse (die-attrs x))
-                      (reverse (die-vals x))))))
-    (and=> (find-die roots pred
-                     #:recurse? (lambda (die)
-                                  (case (die-tag die)
-                                    ((compile-unit) #t)
-                                    ((structure-type class-type)
-                                     (eq? (ctx-language (die-ctx die))
-                                          'C-plus-plus))
-                                    (else #f))))
-           (cut visit-die <> '()))))
+(define* (extract-one-definition die #:optional (depth 1))
+  (define* (visit-die x seen)
+    (define (recurse y)
+      (visit-die y (cons x seen)))
+    (define (visit-children y)
+      (case (die-tag y)
+        ((subprogram)
+         (map recurse
+              (filter (lambda (x)
+                        (case (die-tag x)
+                          ((formal-parameter unspecified-parameters) #t)
+                          (else #f)))
+                      (die-children y))))
+        (else
+         (map recurse (die-children y)))))
+    (if (and (or (< depth (length seen))
+                 (find (lambda (y) (equal? (die-offset y) (die-offset x)))
+                       seen))
+             (memq (die-tag x)
+                   '(structure-type union-type class-type typedef
+                                    enumeration-type))
+             (die-name x))
+        (type-name x)
+        (extract-declaration x recurse visit-children)))
+  (visit-die die '()))
+
+(define (find-one-definition ctx pred)
+  (find-die (read-die-roots ctx)
+            pred
+            #:recurse? (lambda (die)
+                         (case (die-tag die)
+                           ((compile-unit) #t)
+                           ((structure-type class-type)
+                            (eq? (ctx-language (die-ctx die))
+                                 'C-plus-plus))
+                           (else #f)))))
