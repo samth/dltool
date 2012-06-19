@@ -552,7 +552,7 @@
 #;
 (fold-pubnames ctx find-pubnames #f)
 
-(define* (extract-one-definition die #:optional (depth 1))
+(define* (extract-one-definition die #:optional (depth 0))
   (define* (visit-die x seen)
     (define (recurse y)
       (visit-die y (cons x seen)))

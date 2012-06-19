@@ -190,16 +190,15 @@ Print a list of exported symbols.
 "
   (for-each
    (lambda (sym)
-     (if (= (elf-symbol-type sym) STT_OBJECT)
-         (format #t "~a: ~a at ~a\n"
-                 (elf-symbol-name sym)
-                 (cond
-                  ((= (elf-symbol-type sym) STT_OBJECT)
-                   "object")
-                  ((= (elf-symbol-type sym) STT_FUNC)
-                   "function")
-                  (else "<unknown>"))
-                 (elf-symbol-value sym))))
+     (format #t "~a: ~a at ~a\n"
+             (elf-symbol-name sym)
+             (cond
+              ((= (elf-symbol-type sym) STT_OBJECT)
+               "object")
+              ((= (elf-symbol-type sym) STT_FUNC)
+               "function")
+              (else "<unknown>"))
+             (elf-symbol-value sym)))
    (all-exports
     (parse-elf (call-with-input-file
                    (if (string-index lib #\/)
@@ -258,7 +257,7 @@ local to a compilation unit (e.g. inside the C file).  When using
   (call-with-values (lambda () (load-dwarf-context lib))
     (lambda (ctx lib-elf)
       (let ((tag (and=> tag string->symbol))
-            (d (option-ref options 'depth "1")))
+            (d (option-ref options 'depth "0")))
         (unless (string->number d)
           (error "Bad depth (expected a number)" d))
         (let* ((die (if (option-ref options 'grovel #f)
@@ -267,8 +266,8 @@ local to a compilation unit (e.g. inside the C file).  When using
                          (lambda (die)
                            (and (or (not tag)
                                     (eq? (die-tag die) tag))
-                                (die-ref die 'name)
-                                (string-suffix? (die-ref die 'name) name)
+                                (die-name die)
+                                (string-suffix? (die-name die) name)
                                 (equal? (die-qname die) name)
                                 (not (empty-declaration? die)))))
                         (let ((symbol
