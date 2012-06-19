@@ -224,6 +224,18 @@ It's a bit much, but it's useful for debugging.
   "print-one [--depth=N] [--grovel] LIB NAME [KIND]
 Print the definition of a symbol.
 
+By default, without the --grovel option, NAME is searched for in the
+public exports (.dynsym entries) of LIB.  A representation of the
+definition for the symbol is printed on the console, as a single
+s-expression.  The depth of the type declarations in the definition can
+be controlled with the --depth option.
+
+With the --grovel option, instead of looking for NAME in the public
+exports, the print-one command will grovel about in the debugging
+entries for LIB, looking for one whose name matches.  Usually you don't
+want this, but it is useful when looking for information not present in
+.dynsym, like type definitions.
+
 Note that there are two different identifier namespaces in C and C++:
 the namespace of \"tagged types\" (structs, classes, unions and enums),
 and another namespace for the rest of things, including functions and
@@ -240,8 +252,8 @@ converting underscores to dashes).
 Finally, we should note that each separate compilation unit effectively
 instantiates a new type tree.  Some of those types will be shared with
 other compilation units, but it is always possible to define a type
-local to a compilation unit (e.g. inside the C file).  So do check the
-result to ensure its sanity.
+local to a compilation unit (e.g. inside the C file).  When using
+--grovel, you should check the result to ensure its sanity.
 "
   (call-with-values (lambda () (load-dwarf-context lib))
     (lambda (ctx lib-elf)
