@@ -194,7 +194,8 @@
           (let ((f (string-append path "/" base)))
             (and (not (file-is-directory? f))
                  f)))
-        (scandir path matcher)))
+        (or (false-if-exception (scandir path matcher))
+            '())))
      search-path)))
 
 (define (has-elf-magic? file)
