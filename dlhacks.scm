@@ -1,5 +1,5 @@
 ;; guile-dlhacks
-;; Copyright (C) 2012 Andy Wingo <wingo@igalia.com>
+;; Copyright (C) 2012, 2013 Andy Wingo <wingo@igalia.com>
 
 ;; This library is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU Lesser General Public License as
@@ -179,11 +179,11 @@
     ;; version.
     (lambda (f)
       (if (string= head f)
-          #t
+          '()
           (and (string-prefix? head f)
                (let ((tail (substring f len)))
                  (and (string-prefix? "." tail)
-                      (string->number (cadr (string-split tail #\.))))))))))
+                      (cdr (string-split tail #\.)))))))))
 
 (define (find-library-candidates stem search-path extension)
   (let* ((matcher (library-matcher stem extension)))
@@ -204,32 +204,46 @@
         (call-with-input-file file
           (lambda (f) (get-bytevector-n f 64))))))
 
-(define* (find-library stem #:key
-                       (search-path (system-library-search-path))
-                       (extension "so")
-                       version)
+(define* (find-libraries stem #:key
+                         (search-path (system-library-search-path))
+                         (extension "so")
+                         version)
   (define so-version (library-matcher stem extension))
+  (define (version>? vx vy)
+    (match vx
+      (() (match vy (() #f) (_ #t)))
+      ((vx . vx*)
+       (match vy
+         (() #f)
+         ((vy . vy*)
+          (cond
+           ((equal? vx vy) (version>? vx* vy*))
+           ((and (string->number vx) (string->number vy))
+            (> (string->number vx) (string->number vy)))
+           (else
+            (string>? vx vy))))))))
   (let ((candidates
          (filter has-elf-magic?
                  (find-library-candidates stem search-path extension))))
     (if version
-        ;; Find a library with a particular version.
-        (find (lambda (elt) (equal? (so-version elt) version))
-              candidates)
-        ;; Otherwise, find the first unversioned library.  If none is
-        ;; found, return the path with the highest version.
-        (let lp ((in candidates) (candidate #f))
-          (if (null? in)
-              candidate
-              (let ((v (so-version (car in))))
-                (if (equal? v #t)
-                    ;; We have our unversioned match.
-                    (car in)
-                    (lp (cdr in)
-                        (if (or (not candidate)
-                                (and v (> v (so-version candidate))))
-                            (car in)
-                            candidate)))))))))
+        ;; Find libraries with a particular version.
+        (filter (lambda (elt) (equal? (so-version (basename elt)) version))
+                candidates)
+        ;; Otherwise, give priority to unversioned libraries (usually
+        ;; symlinks), and otherwise to higher-versioned libraries.
+        (stable-sort (filter (compose so-version basename) candidates)
+                     (lambda (x y)
+                       (version>? (so-version (basename x))
+                                  (so-version (basename y))))))))
+
+(define* (find-library stem #:key
+                       (search-path (system-library-search-path))
+                       (extension "so")
+                       version)
+  (match (find-libraries stem #:search-path search-path #:extension extension
+                         #:version version)
+    ((elt . _) elt)
+    (() #f)))
 
 (define (extract-exported-symbols elf)
   (let ((strs (assoc-ref (elf-sections-by-name elf) ".dynstr"))
