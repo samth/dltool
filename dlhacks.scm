@@ -336,11 +336,16 @@
                            (error "Failed to find library" lib))))
          (lib-elf (load-elf lib-path))
          (dbg-path (find-debug-object lib-path lib-elf)))
-    (values (elf->dwarf-context (if (equal? lib-path dbg-path)
-                                    lib-elf
-                                    (load-elf dbg-path))
-                                #:path dbg-path
-                                #:lib-path lib-path)
+    (values (elf->dwarf-context
+             (if (equal? lib-path dbg-path)
+                 lib-elf
+                 (let ((dbg-elf (load-elf dbg-path)))
+                   (unless (assoc-ref (elf-sections-by-name dbg-elf)
+                                      ".debug_info")
+                     (error "Debugging file has no .debug_info" dbg-path))
+                   dbg-elf))
+             #:path dbg-path
+             #:lib-path lib-path)
             lib-elf)))
 
 (define (empty-declaration? die)
