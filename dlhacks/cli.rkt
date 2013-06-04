@@ -19,7 +19,7 @@
 ;; 59 Temple Place - Suite 330        Fax:    +1-617-542-2652
 ;; Boston, MA  02111-1307,  USA       gnu@gnu.org
 
-(require pkg/commands "main.rkt" "elf.rkt" "dwarf.rkt" srfi/13 (only-in srfi/1 find))
+(require "cli-aux.rkt" "main.rkt" "elf.rkt" "dwarf.rkt" srfi/13 (only-in srfi/1 find))
 
 (define *common-options*
   '((help (single-char #\h))
@@ -125,14 +125,6 @@ sections (e.g. \".zdebug_info\"), as used by some distributions.
     (emit-bug-reporting-address "dltool" "wingo@igalia.com"
                                 #:url "https://gitorious.org/guile-dlhacks/"))))
 
-(define (all-exports lib-elf)
-  (sort (extract-exported-symbols lib-elf)
-        (lambda (a b)
-          (string<? (elf-symbol-name a) (elf-symbol-name b)))))
-
-(define (load-die-roots lib)
-  (read-die-roots (load-dwarf-context lib)))
-
 (define-command ((print-decls) options lib . syms)
   "print-decls LIB [SYM...]
 Print declarations for a library's publically exported symbols.
@@ -146,52 +138,13 @@ This command uses the .dlsym section of the ELF file to find the
 definitions, so it only works for exported functions and variables.  To
 grovel for internal variables, use the \"print-one --grovel\" command.
 "
-  (for-each
-   pretty-print
-   (call-with-values (lambda () (load-dwarf-context lib))
-     (lambda (ctx lib-elf)
-       (let ((symbols (all-exports lib-elf)))
-         (for-each (lambda (name)
-                     (unless (find (lambda (symbol)
-                                     (equal? (elf-symbol-name symbol) name))
-                                   symbols)
-                       (error "Failed to find symbol in exports list:" name)))
-                   syms)
-         (extract-definitions
-          (resolve-symbols
-           ctx
-           (if (null? syms)
-               symbols
-               (filter (lambda (symbol)
-                         (member (elf-symbol-name symbol) syms))
-                       symbols))
-           (lambda (name)
-             (format (current-error-port)
-                     "warning: no debug information for symbol: ~a\n"
-                     name)))))))))
+  (-print-decls options lib syms))
 
 (define-command ((list-exports) options lib)
   "list-exports LIB
 Print a list of exported symbols.
 "
-  (for-each
-   (lambda (sym)
-     (format #t "~a: ~a at ~a\n"
-             (elf-symbol-name sym)
-             (cond
-              ((= (elf-symbol-type sym) STT_OBJECT)
-               "object")
-              ((= (elf-symbol-type sym) STT_FUNC)
-               "function")
-              (else "<unknown>"))
-             (elf-symbol-value sym)))
-   (all-exports
-    (parse-elf (call-with-input-file
-                   (if (string-index lib #\/)
-                       lib
-                       (or (find-library lib)
-                           (error "Failed to find library" lib)))
-                 port->bytes)))))
+  (-list-exports options lib))
 
 (define-command ((dump) options lib)
   "dump LIB
@@ -200,9 +153,7 @@ Parse all debugging information out of a library.
 This command prints all information that it can find out to the console.
 It's a bit much, but it's useful for debugging.
 "
-  (for-each (lambda (x)
-              (pretty-print (die->tree x) #:width 120))
-            (load-die-roots lib)))
+  (-dump options lib))
 
 (define-command ((print-one (depth (value #t)) (grovel)) options lib name
                  #:optional tag)
@@ -240,41 +191,7 @@ other compilation units, but it is always possible to define a type
 local to a compilation unit (e.g. inside the C file).  When using
 --grovel, you should check the result to ensure its sanity.
 "
-  (call-with-values (lambda () (load-dwarf-context lib))
-    (lambda (ctx lib-elf)
-      (let ((tag (and=> tag string->symbol))
-            (d (option-ref options 'depth "0")))
-        (unless (string->number d)
-          (error "Bad depth (expected a number)" d))
-        (let* ((die (if (option-ref options 'grovel #f)
-                        (find-one-definition
-                         ctx
-                         (lambda (die)
-                           (and (or (not tag)
-                                    (eq? (die-tag die) tag))
-                                (die-name die)
-                                (string-suffix? (die-name die) name)
-                                (equal? (die-qname die) name)
-                                (not (empty-declaration? die)))))
-                        (let ((symbol
-                               (find (lambda (symbol)
-                                       (equal? (elf-symbol-name symbol) name))
-                                     (all-exports lib-elf))))
-                          (unless symbol
-                            (error "Failed to find symbol in exports list:"
-                                   name))
-                          (cdar (resolve-symbols
-                                 ctx
-                                 (list symbol)
-                                 (lambda (name)
-                                   (error "No debugging info found for symbol:"
-                                          name))))))))
-          (unless die
-            (format (current-error-port)
-                    "ERROR: Failed to find ~a in library ~a: ~a\n"
-                    (or tag "definition") lib name)
-            (exit 1))
-          (pretty-print (extract-one-definition die (string->number d))))))))
+  (-print-one options lib name tag))
 
 (define (dispatch-command command args debug?)
   (let ((c (find-command command)))

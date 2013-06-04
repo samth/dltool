@@ -786,7 +786,7 @@
                        (bytevector-u16-ref bv (+ offset 6) byte-order))
       (error "corrupt ELF (offset out of range)" offset)))
 
-(define (elf-symbol-table-ref elf section n #:optional strtab)
+(define (elf-symbol-table-ref elf section n [strtab #f])
   (let ((bv (elf-bytes elf))
         (byte-order (elf-byte-order elf))
         (stroff (and strtab (elf-section-offset strtab)))
