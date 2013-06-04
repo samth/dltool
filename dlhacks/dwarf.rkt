@@ -685,7 +685,7 @@
       abbrevs
       parent die start end [children #:mutable])
   #:property prop:custom-write
-  (lambda (x w? port)
+  (lambda (x port w?)
     (fprintf port "<dwarf-context ~a>"
              (number->string (eq-hash-code x) 16))))
 
@@ -1431,8 +1431,8 @@
          (abbrevs (dict-ref sections ".debug_abbrev"))
          (strtab (dict-ref sections ".debug_str"))
          (loc (dict-ref sections ".debug_loc"))
-         (pubnames (dict-ref sections ".debug_pubnames"))
-         (aranges (dict-ref sections ".debug_aranges")))
+         (pubnames (dict-ref sections ".debug_pubnames" #f))
+         (aranges (dict-ref sections ".debug_aranges" #f)))
     (make-dwarf-context (elf-bytes elf)
                         (elf-word-size elf)
                         (elf-byte-order elf)

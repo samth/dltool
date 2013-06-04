@@ -19,7 +19,7 @@
 ;; 59 Temple Place - Suite 330        Fax:    +1-617-542-2652
 ;; Boston, MA  02111-1307,  USA       gnu@gnu.org
 
-(require pkg/commands "main.rkt" "elf.rkt" "dwarf.rkt" (only-in srfi/1 find))
+(require pkg/commands "main.rkt" "elf.rkt" "dwarf.rkt" srfi/13 (only-in srfi/1 find))
 
 (define *common-options*
   '((help (single-char #\h))
@@ -191,7 +191,7 @@ Print a list of exported symbols.
                        lib
                        (or (find-library lib)
                            (error "Failed to find library" lib)))
-                 get-bytevector-all)))))
+                 port->bytes)))))
 
 (define-command ((dump) options lib)
   "dump LIB

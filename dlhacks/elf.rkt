@@ -236,8 +236,9 @@
 
 (struct elf
   (bytes word-size byte-order abi type machine-type
-            entry phoff shoff flags ehsize
-            phentsize phnum shentsize shnum shstrndx))
+	 entry phoff shoff flags ehsize
+	 phentsize phnum shentsize shnum shstrndx)
+  #;#:transparent)
 
 (define (parse-elf32 bv byte-order)
   (elf bv 4 byte-order
@@ -512,7 +513,8 @@
 
 (define-struct elf-section
   (name type flags addr offset size link info addralign entsize)
-  #:omit-define-syntaxes)
+  #:omit-define-syntaxes
+  #;#:transparent)
 
 (define/key (make-elf-section* #:key (name 0) (type SHT_PROGBITS)
                             (flags SHF_ALLOC) (addr 0) (offset 0) (size 0)
@@ -738,8 +740,7 @@
                  section))
          sections)))
 
-(define-struct elf-symbol
-  (name value size info other shndx))
+(define-struct elf-symbol (name value size info other shndx) #:transparent)
 
 ;; typedef struct {
 ;;     uint32_t      st_name;
@@ -854,8 +855,7 @@
 (define NT_GNU_BUILD_ID 3)
 (define NT_GNU_GOLD_VERSION 4)
 
-(define-struct elf-note
-  (name desc type))
+(define-struct elf-note (name desc type) #:transparent)
 
 (define (parse-elf-note elf section)
   (let ((bv (elf-bytes elf))
@@ -889,8 +889,7 @@
 ;; Rel32/4 is a relative signed offset in 32-bit units.  Either can have
 ;; an arbitrary addend as well.
 ;;
-(define-struct reloc
-  (type loc addend symbol))
+(define-struct reloc (type loc addend symbol) #:transparent)
 
 ;; A symbol is an association between a name and an address.  The
 ;; address is always in regard to some particular address space.  When
@@ -900,10 +899,10 @@
 ;; the position the ELF will be loaded at.
 ;;
 (define-struct symbol
-  (name address))
+  (name address) #:transparent)
 
 (define-struct object
-  (section bv relocs symbols))
+  (section bv relocs symbols) #:transparent)
 
 (define (make-string-table)
   '(("" 0 #"")))
