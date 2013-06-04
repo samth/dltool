@@ -477,7 +477,7 @@
             (unless (empty-declaration? die)
               (let ((decl (recurse die)))
                 (match (dict-ref types-by-name name #f)
-                  ((cons name* decl*)
+                  ((? values decl*)
                    (unless (compatible-declarations? die decl decl*)
                      (pretty-print decl (current-error-port))
                      (pretty-print decl* (current-error-port))
