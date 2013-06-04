@@ -677,13 +677,15 @@
          strtab-start strtab-end
          loc-start loc-end
          pubnames-start pubnames-end
-         aranges-start aranges-end))
+         aranges-start aranges-end)
+  #:transparent)
 (define make-dwarf-meta meta)
 
 (define-struct ctx
   (bv word-size endianness meta
       abbrevs
       parent die start end [children #:mutable])
+  #:transparent
   #:property prop:custom-write
   (lambda (x port w?)
     (fprintf port "<dwarf-context ~a>"
@@ -793,7 +795,8 @@
           (lp (1+ end))))))
 
 (define-struct abbrev
-  (code tag has-children? attrs forms))
+  (code tag has-children? attrs forms)
+  #:transparent)
 
 (define (read-abbrev ctx pos)
   (let*-values (((code pos) (read-uleb128 ctx pos))
@@ -1091,7 +1094,7 @@
 ;; "Debugging Information Entries": DIEs.
 ;;
 (define-struct die
-  (ctx offset abbrev [%vals #:mutable]))
+  (ctx offset abbrev [%vals #:mutable]) #:transparent)
 (define %die-vals die-%vals)
 (define %set-die-vals! set-die-%vals!)
 
@@ -1185,7 +1188,6 @@
   (call-with-values (lambda () e) (lambda (x . y) x)))
 
 (define (die-sibling ctx abbrev offset [offset-vals #f] [offset-end #f])
-  (eprintf ">>> in d-s\n")
   (cond
    ((not (abbrev-has-children? abbrev))
     (or offset-end
@@ -1290,15 +1292,12 @@
         (cond
          ((not abbrev) (values seed pos))
          ((skip? ctx offset abbrev)
-          (eprintf ">>> ~a ~a\n"  (die-sibling ctx abbrev offset pos) seed)
 	  (lp (die-sibling ctx abbrev offset pos) seed))
          (else
           (let-values (((vals pos) (read-values ctx pos abbrev)))
             (let* ((die (make-die ctx offset abbrev vals))
                    (seed (proc die seed))
-		   (_ (eprintf ">>> calling d-s\n"))
 		   (sib (die-sibling ctx abbrev offset #f pos)))
-	      (eprintf ">>> sib ~a ~a\n" sib seed)
               (lp sib seed)))))))))
 
 (define/key (fold-die-children die proc seed #:key

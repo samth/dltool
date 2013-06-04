@@ -202,7 +202,7 @@
   (and (file-exists? file)
        (has-elf-header?
         (call-with-input-file file
-          (lambda (f) (read-bytes f 64))))))
+          (lambda (f) (read-bytes 64 f))))))
 
 (define/key (find-libraries stem #:key
                          (search-path (system-library-search-path))
@@ -285,7 +285,7 @@
         (lp (1+ end)))))
 
 (define (search-debug-dirs basename dirname)
-  (let ((path (string-append (global-debug-path) dirname "/" basename)))
+  (let ((path (string-append (global-debug-path) (path->string dirname) "/" basename)))
     (and (has-elf-magic? path)
          path)))
 
@@ -295,7 +295,7 @@
       (if (= (string-length s) 1)
           (string-append "0" s)
           s)))
-  (let* ((bytes (bytevector->u8-list build-id))
+  (let* ((bytes (bytes->list build-id))
          (path (string-concatenate
                 `(,(global-debug-path)
                   "/.build-id/"
@@ -308,15 +308,15 @@
 
 (define (find-debug-object library elf)
   (let ((sections (elf-sections-by-name elf)))
-    (or (and (assoc-ref sections ".debug_info")
+    (or (and (assoc-ref sections ".debug_info" #f)
              library)
-        (and=> (assoc-ref sections ".note.gnu.build-id")
+        (and=> (assoc-ref sections ".note.gnu.build-id" #f)
                (lambda (section)
                  (let ((note (parse-elf-note elf section)))
                    (and (equal? (elf-note-name note) "GNU")
                         (= (elf-note-type note) NT_GNU_BUILD_ID)
                         (search-debug-by-build-id (elf-note-desc note))))))
-        (and=> (assoc-ref sections ".gnu_debuglink")
+        (and=> (assoc-ref sections ".gnu_debuglink" #f)
                (lambda (section)
                  (let-values (((basename crc)
                                (read-debuglink (elf-bytes elf)
@@ -341,7 +341,7 @@
                  lib-elf
                  (let ((dbg-elf (load-elf dbg-path)))
                    (unless (assoc-ref (elf-sections-by-name dbg-elf)
-                                      ".debug_info")
+                                      ".debug_info" #f)
                      (error "Debugging file has no .debug_info" dbg-path))
                    dbg-elf))
              #:path dbg-path

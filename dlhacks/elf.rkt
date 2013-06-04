@@ -238,7 +238,7 @@
   (bytes word-size byte-order abi type machine-type
 	 entry phoff shoff flags ehsize
 	 phentsize phnum shentsize shnum shstrndx)
-  #;#:transparent)
+  #:transparent)
 
 (define (parse-elf32 bv byte-order)
   (elf bv 4 byte-order
@@ -514,7 +514,7 @@
 (define-struct elf-section
   (name type flags addr offset size link info addralign entsize)
   #:omit-define-syntaxes
-  #;#:transparent)
+  #:transparent)
 
 (define/key (make-elf-section* #:key (name 0) (type SHT_PROGBITS)
                             (flags SHF_ALLOC) (addr 0) (offset 0) (size 0)
