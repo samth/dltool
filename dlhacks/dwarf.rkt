@@ -1477,7 +1477,7 @@
                         '())))
 
 (define (die->tree die)
-  (list* (die-tag die)
+  (cons* (die-tag die)
          (cons 'offset (die-offset die))
          (reverse (fold-die-children
                     die

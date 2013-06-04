@@ -20,7 +20,9 @@
 ;;; Code:
 (require ffi/unsafe rnrs/bytevectors-6 (for-syntax syntax/parse racket/syntax))
 
-(provide define/key false-if-exception)
+(provide define/key false-if-exception cons*)
+
+(define cons* list*)
 
 ;; STH FIXME -- where do these come from
 (define target-endianness 'big)

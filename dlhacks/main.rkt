@@ -58,6 +58,7 @@
 (define ld-so-conf
   (make-parameter "/etc/ld.so.conf"))
 
+;; STH FIXME -- does this actually work?
 (define (scandir path selector)
   (sort (for/list ([e (in-directory path)] #:when (selector e)) e) 
 	string-locale<?)
@@ -506,7 +507,7 @@
 				(decl (recurse die)))
 			   (if (equal? (die-name die) name)
 			       decl
-			       (list* (car decl) (list 'public-name name) (cdr decl)))))
+			       (cons* (car decl) (list 'public-name name) (cdr decl)))))
 		       name-die-pairs)])
 	      ([(name decl) types-by-name])
 	      (cons decl tail))))
