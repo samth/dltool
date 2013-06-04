@@ -1123,10 +1123,12 @@
                  (die-abbrev die))))
 
 (define (die-ref die attr [default #f])
-  (cond
-   ((list-index (lambda (e) (equal? attr e)) (die-attrs die))
-    => (lambda (n) (list-ref (die-vals die) n)))
-   (else default)))
+  (or 
+   (for/or ([a (in-list (die-attrs die))]
+	    [v (in-list (die-vals die))]
+	    #:when (equal? attr a))
+     v)
+   default))
 
 (define (die-specification die)
   (cond [(die-ref die 'specification) 

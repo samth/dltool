@@ -387,7 +387,12 @@
       (else
        (cons (list attr val) tail))))
   (cons (die-tag die)
-        (fold
+	(for/fold ([init (visit-children die)])
+		  ([a (in-list (die-attrs die))]
+		   [v (in-list (die-vals die))])
+	    (visit-attr a v init))
+	#;
+        (foldr
          visit-attr
          (visit-children die)
          (reverse (die-attrs die))
@@ -476,14 +481,14 @@
             (hash-set! types-by-offset (die-offset die) name)
             (unless (empty-declaration? die)
               (let ((decl (recurse die)))
-                (match (dict-ref types-by-name name #f)
+                (match (hash-ref types-by-name name #f)
                   ((? values decl*)
                    (unless (compatible-declarations? die decl decl*)
                      (pretty-print decl (current-error-port))
                      (pretty-print decl* (current-error-port))
                      (error "two types with the same name but incompatible decls" name)))
                   (#f
-                   (set! types-by-name (dict-set types-by-name name decl))))))
+                   (set! types-by-name (hash-set types-by-name name decl))))))
             name)))
     (define (visit-children die)
       (define (has-tag? tag)
