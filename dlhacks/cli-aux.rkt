@@ -26,7 +26,7 @@
                            (error "Failed to find library" lib)))
                  port->bytes)))))
 
-(define (-print-one options lib name tag)
+(define (-print-one options lib name [tag #f])
     (call-with-values (lambda () (load-dwarf-context lib))
     (lambda (ctx lib-elf)
       (let ((tag (and=> tag string->symbol))
@@ -76,7 +76,7 @@
 (define (load-die-roots lib)
   (read-die-roots (load-dwarf-context lib)))
 
-(define (-print-decls options lib syms)
+(define (-print-decls options lib [syms '()])
   (for-each
    pretty-print
    (call-with-values (lambda () (load-dwarf-context lib))
@@ -97,6 +97,6 @@
                          (member (elf-symbol-name symbol) syms))
                        symbols))
            (lambda (name)
-             (format (current-error-port)
-                     "warning: no debug information for symbol: ~a\n"
-                     name)))))))))
+             (fprintf (current-error-port)
+		      "warning: no debug information for symbol: ~a\n"
+		      name)))))))))

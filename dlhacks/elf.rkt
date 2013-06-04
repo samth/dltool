@@ -1122,7 +1122,7 @@
                   relocs))))
 
 (define-syntax-rule (false-if-exception e)
-  (with-handlers ([exn:fail? #f]) e))
+  (with-handlers ([exn:fail? (lambda _ #f)]) e))
 
 (define (compute-sections-by-name seglists)
   (let lp ((in (apply append (map cdr seglists)))

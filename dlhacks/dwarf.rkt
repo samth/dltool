@@ -819,7 +819,8 @@
                        (end (meta-abbrevs-end
                              (ctx-meta ctx))))
   (let lp ((abbrevs '()) (pos (+ start pos)) (max-code -1))
-    (if (zero? (read-u8 ctx pos))
+    (define-values (r p) (read-u8 ctx pos))
+    (if (zero? r)
         (if (< pos end)
             (let ((av (make-vector (1+ max-code) #f)))
               (for-each (lambda (a)
@@ -902,7 +903,7 @@
       (unless strtab
         (error "expected a string table" ctx))
       (let-values (((offset pos) (read-u32 ctx pos)))
-        (values (read-string ctx (+ strtab offset))
+        (values (FIRST-VALUE (read-string ctx (+ strtab offset)))
                 pos))))
   skip-32)
 
@@ -1070,7 +1071,7 @@
       ...
       (lambda (ctx attr val)
         (cond
-         ((hash-ref parsers attr) => (lambda (p) (p ctx val)))
+         ((hash-ref parsers attr #f) => (lambda (p) (p ctx val)))
          (else val))))))
 
 (define-attribute-parsers parse-attribute
@@ -1107,9 +1108,10 @@
   (let ((vals (%die-vals die)))
     (or vals
         (begin
-          (%set-die-vals! die (read-values (die-ctx die) 
-                                           (skip-leb128 (die-ctx die) (die-offset die))
-                                           (die-abbrev die)))
+          (%set-die-vals! die (FIRST-VALUE 
+			       (read-values (die-ctx die) 
+					    (skip-leb128 (die-ctx die) (die-offset die))
+					    (die-abbrev die))))
           (die-vals die)))))
 
 (define (die-next-offset die [offset-vals #f])
@@ -1119,7 +1121,7 @@
 
 (define (die-ref die attr [default #f])
   (cond
-   ((list-index (die-attrs die) attr)
+   ((list-index (lambda (e) (equal? attr e)) (die-attrs die))
     => (lambda (n) (list-ref (die-vals die) n)))
    (else default)))
 
@@ -1173,13 +1175,17 @@
             #f pos)))
 
 (define (read-die ctx offset)
-  (let*-values (((abbrev pos) (read-die-abbrev ctx offset)))
+  (let*-values (((abbrev pos _1 _2) (read-die-abbrev ctx offset)))
     (if abbrev
         (values (make-die ctx offset abbrev #f)
                 (skip-values ctx pos abbrev))
         (values #f pos))))
 
+(define-syntax-rule (FIRST-VALUE e)
+  (call-with-values (lambda () e) (lambda (x . y) x)))
+
 (define (die-sibling ctx abbrev offset [offset-vals #f] [offset-end #f])
+  (eprintf ">>> in d-s\n")
   (cond
    ((not (abbrev-has-children? abbrev))
     (or offset-end
@@ -1191,7 +1197,7 @@
              (attrs (abbrev-attrs abbrev))
              (forms (abbrev-forms abbrev)))
       (if (eq? (car attrs) 'sibling)
-          (read-value ctx offset (car forms))
+          (FIRST-VALUE (read-value ctx offset (car forms)))
           (lp (skip-value ctx offset (car forms))
               (cdr attrs) (cdr forms)))))
    (else
@@ -1229,7 +1235,7 @@
   (find-leaf (find-root ctx)))
 
 (define (find-die-by-offset ctx offset)
-  (or (read-die (find-die-context ctx offset) offset)
+  (or (FIRST-VALUE (read-die (find-die-context ctx offset) offset))
       (error "Failed to read DIE at offset" offset)))
 
 #;
@@ -1280,22 +1286,26 @@
 (define (fold-die-list ctx offset skip? proc seed)
   (let ((ctx (find-die-context ctx offset)))
     (let lp ((offset offset) (seed seed))
-      (let-values (((abbrev pos) (read-die-abbrev ctx offset)))
+      (let-values (((abbrev pos _1 _2) (read-die-abbrev ctx offset)))
         (cond
          ((not abbrev) (values seed pos))
          ((skip? ctx offset abbrev)
-          (lp (die-sibling ctx abbrev offset pos) seed))
+          (eprintf ">>> ~a ~a\n"  (die-sibling ctx abbrev offset pos) seed)
+	  (lp (die-sibling ctx abbrev offset pos) seed))
          (else
           (let-values (((vals pos) (read-values ctx pos abbrev)))
             (let* ((die (make-die ctx offset abbrev vals))
-                   (seed (proc die seed)))
-              (lp (die-sibling ctx abbrev offset #f pos) seed)))))))))
+                   (seed (proc die seed))
+		   (_ (eprintf ">>> calling d-s\n"))
+		   (sib (die-sibling ctx abbrev offset #f pos)))
+	      (eprintf ">>> sib ~a ~a\n" sib seed)
+              (lp sib seed)))))))))
 
 (define/key (fold-die-children die proc seed #:key
                             (skip? (lambda (ctx offset abbrev) #f)))
   (if (abbrev-has-children? (die-abbrev die))
-      (values (fold-die-list (die-ctx die) (die-next-offset die)
-                             skip? proc seed))
+      (values (FIRST-VALUE (fold-die-list (die-ctx die) (die-next-offset die)
+                             skip? proc seed)))
       seed))
 
 (define (die-children die)
@@ -1356,7 +1366,7 @@
                 ((av) (read-abbrevs ctx abbrevs-offset))
                 ((addrsize pos) (read-u8 ctx pos))
                 ((ctx) (make-compilation-unit-context ctx av start len))
-                ((die) (read-die ctx pos)))
+                ((die _1) (read-die ctx pos)))
     (populate-context-tree! die)
     (values die (ctx-end ctx))))
 
