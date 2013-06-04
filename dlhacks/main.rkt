@@ -1,3 +1,4 @@
+#lang racket
 ;; guile-dlhacks
 ;; Copyright (C) 2012, 2013 Andy Wingo <wingo@igalia.com>
 
@@ -26,32 +27,30 @@
 ;;
 ;;; Code:
 
-(define-module (dlhacks)
-  #:use-module (dlhacks elf)
-  #:use-module (dlhacks dwarf)
-  #:use-module (ice-9 match)
-  #:use-module (ice-9 rdelim)
-  #:use-module (ice-9 regex)
-  #:use-module (ice-9 binary-ports)
-  #:use-module (ice-9 vlist)
-  #:use-module ((ice-9 i18n) #:select (string-locale<?))
-  #:autoload (ice-9 pretty-print) (pretty-print)
-  #:use-module (rnrs bytevectors)
-  #:use-module (srfi srfi-1)
-  #:use-module (srfi srfi-11)
-  #:use-module (srfi srfi-26)
-  #:export (global-debug-path
-            ld-so-conf
-            system-library-search-path
-            find-library
-            find-debug-object
-            load-dwarf-context
-            empty-declaration?
-            extract-exported-symbols
-            extract-definitions
-            resolve-symbols
-            find-one-definition
-            extract-one-definition))
+(require "elf.rkt" "dwarf.rkt" srfi/13 (only-in srfi/1 fold append-reverse find)
+	  rnrs/bytevectors-6)
+
+(define (basename v)
+  (define-values (b n m?) (split-path v))
+  n)
+(define (dirname v)
+  (define-values (b n m?) (split-path v))
+  b)
+(define (floor/ a b) (floor (/ a b)))
+(define assoc-ref dict-ref)
+
+(provide global-debug-path
+	 ld-so-conf
+	 system-library-search-path
+	 find-library
+	 find-debug-object
+	 load-dwarf-context
+	 empty-declaration?
+	 extract-exported-symbols
+	 extract-definitions
+	 resolve-symbols
+	 find-one-definition
+	 extract-one-definition)
 
 (define global-debug-path
   (make-parameter "/usr/lib/debug"))
@@ -60,6 +59,9 @@
   (make-parameter "/etc/ld.so.conf"))
 
 (define (scandir path selector)
+  (sort (for/list ([e (in-directory path)] #:when (selector e)) e) 
+	string-locale<?)
+  #;
   (let ((dir (opendir path)))
     (let lp ((out '()))
       (let ((ent (readdir dir)))
@@ -108,28 +110,27 @@
 
 (define (compute-matches head s)
   (if (glob? s)
-      (let ((pat (make-regexp (glob->regexp s)))
+      (let ((pat (regexp (glob->regexp s)))
             (dir (join-path head)))
-        (catch #t
+        (with-handlers ([exn:fail? (lambda _ '())])
           (lambda ()
             (scandir dir
                      (lambda (s)
                        (and (not (equal? s "."))
                             (not (equal? s ".."))
-                            (regexp-exec pat s)
-                            s))))
-          (lambda _ '())))
+                            (regexp-match pat s)
+                            s))))))
       (list s)))
 
 (define (expand-glob s)
   (let lp ((head '()) (tail (string-split s #\/)))
     (match tail
-      (()
+      ((list)
        (let ((path (join-path head)))
          (if (file-exists? path)
              (list path)
              '())))
-      ((pat . tail)
+      ((cons pat tail)
        (append-map (lambda (elt)
                      (lp (cons elt head) tail))
                    (compute-matches head pat))))))
@@ -166,7 +167,7 @@
      (cond ((getenv "LD_LIBRARY_PATH")
             => (lambda (path)
                  (filter (lambda (x)
-                           (false-if-exception (file-is-directory? x)))
+                           (false-if-exception (directory-exists? x)))
                          (string-split path #\:))))
            (else '()))
      (load-conf (ld-so-conf)))))
@@ -192,7 +193,7 @@
        (filter-map
         (lambda (base)
           (let ((f (string-append path "/" base)))
-            (and (not (file-is-directory? f))
+            (and (not (directory-exists? f))
                  f)))
         (or (false-if-exception (scandir path matcher))
             '())))
@@ -202,20 +203,20 @@
   (and (file-exists? file)
        (has-elf-header?
         (call-with-input-file file
-          (lambda (f) (get-bytevector-n f 64))))))
+          (lambda (f) (read-bytes f 64))))))
 
-(define* (find-libraries stem #:key
+(define/key (find-libraries stem #:key
                          (search-path (system-library-search-path))
                          (extension "so")
-                         version)
+                         [version #f])
   (define so-version (library-matcher stem extension))
   (define (version>? vx vy)
     (match vx
-      (() (match vy (() #f) (_ #t)))
-      ((vx . vx*)
+      ('() (match vy ('() #f) (_ #t)))
+      ((cons vx vx*)
        (match vy
-         (() #f)
-         ((vy . vy*)
+         ('() #f)
+         ((cons vy vy*)
           (cond
            ((equal? vx vy) (version>? vx* vy*))
            ((and (string->number vx) (string->number vy))
@@ -231,23 +232,23 @@
                 candidates)
         ;; Otherwise, give priority to unversioned libraries (usually
         ;; symlinks), and otherwise to higher-versioned libraries.
-        (stable-sort (filter (compose so-version basename) candidates)
-                     (lambda (x y)
-                       (version>? (so-version (basename x))
-                                  (so-version (basename y))))))))
+        (sort (filter (compose so-version basename) candidates)
+	      (lambda (x y)
+		(version>? (so-version (basename x))
+			   (so-version (basename y))))))))
 
-(define* (find-library stem #:key
+(define/key (find-library stem #:key
                        (search-path (system-library-search-path))
                        (extension "so")
-                       version)
+                       [version #f])
   (match (find-libraries stem #:search-path search-path #:extension extension
                          #:version version)
-    ((elt . _) elt)
-    (() #f)))
+    ((cons elt _) elt)
+    ('() #f)))
 
 (define (extract-exported-symbols elf)
-  (let ((strs (assoc-ref (elf-sections-by-name elf) ".dynstr"))
-        (syms (assoc-ref (elf-sections-by-name elf) ".dynsym")))
+  (let ((strs (dict-ref (elf-sections-by-name elf) ".dynstr"))
+        (syms (dict-ref (elf-sections-by-name elf) ".dynsym")))
     (unless (and strs (= (elf-section-type strs) SHT_STRTAB))
       (error "ELF object has no dynamic string table"))
     (unless (and syms (= (elf-section-type syms) SHT_DYNSYM))
@@ -327,7 +328,7 @@
         (error "No debugging symbols for library" library))))
 
 (define (load-elf file)
-  (parse-elf (call-with-input-file file get-bytevector-all)))
+  (parse-elf (call-with-input-file file port->bytes)))
 
 (define (load-dwarf-context lib)
   (let* ((lib-path (if (string-index lib #\/)
@@ -415,36 +416,36 @@
 (define (compatible-declarations? die decl previous-decl)
   (define (elidable? elt)
     (match elt
-      (('subprogram . attrs)
+      ((cons 'subprogram attrs)
        (not (assoc 'virtuality attrs)))
       (_ #f)))
   ;; A "subset" has fewer decls than a "superset".
   (define (compatible-subset? sub super)
     (match sub
-      (('base-type . sub-attrs)
+      ((cons 'base-type sub-attrs)
        (match super
-         (('base-type . super-attrs)
+         ((cons 'base-type super-attrs)
           ;; Notably, the names can be different.
           (and (equal? (assq 'byte-size sub-attrs)
                        (assq 'byte-size super-attrs))
                (equal? (assq 'encoding sub-attrs)
                        (assq 'encoding super-attrs))))
          (_ #f)))
-      ((sub-head . sub-tail)
+      ((cons sub-head sub-tail)
        (match super
-         ((super-head . super-tail)
+         ((cons super-head super-tail)
           (if (or (equal? sub-head super-head)
                   (compatible-subset? sub-head super-head))
               (compatible-subset? sub-tail super-tail)
               (and (elidable? super-head)
                    (compatible-subset? sub super-tail))))
          (_ #f)))
-      (()
+      ('()
        (match super
-         ((super-head . super-tail)
+         ((cons super-head super-tail)
           (and (elidable? super-head)
                (compatible-subset? sub super-tail)))
-         (() #t)))
+         ('() #t)))
       (_ (or (equal? sub super)
              ;; Classes and structures are compatible.  In fact in some
              ;; cases, you will see DWARF declarations for "struct foo;"
@@ -464,25 +465,25 @@
       (compatible-subset? previous-decl decl)
       (compatible-subset? decl previous-decl)))
 
-(define* (extract-definitions name-die-pairs)
-  (let ((types-by-offset (make-hash-table))
-        (types-by-name vlist-null))
+(define (extract-definitions name-die-pairs)
+  (let ((types-by-offset (make-hash))
+        (types-by-name (hash)))
     (define (recurse die)
       (extract-declaration die intern-type visit-children))
     (define (intern-type die)
-      (or (hashv-ref types-by-offset (die-offset die))
+      (or (hash-ref types-by-offset (die-offset die))
           (let* ((name (type-name die)))
-            (hashv-set! types-by-offset (die-offset die) name)
+            (hash-set! types-by-offset (die-offset die) name)
             (unless (empty-declaration? die)
               (let ((decl (recurse die)))
-                (match (vhash-assoc name types-by-name)
-                  ((name* . decl*)
+                (match (hash-ref name types-by-name)
+                  ((cons name* decl*)
                    (unless (compatible-declarations? die decl decl*)
                      (pretty-print decl (current-error-port))
                      (pretty-print decl* (current-error-port))
                      (error "two types with the same name but incompatible decls" name)))
                   (#f
-                   (set! types-by-name (vhash-cons name decl types-by-name))))))
+                   (set! types-by-name (dict-set types-by-name name decl))))))
             name)))
     (define (visit-children die)
       (define (has-tag? tag)
@@ -500,33 +501,31 @@
                         kids)))
           (else
            (map recurse kids)))))
-    (vhash-fold
-     (lambda (name decl tail)
-       (cons decl tail))
-     (map (lambda (pair)
-            (let* ((name (car pair))
-                   (die (cdr pair))
-                   (decl (recurse die)))
-              (if (equal? (die-name die) name)
-                  decl
-                  (cons* (car decl) (list 'public-name name) (cdr decl)))))
-          name-die-pairs)
-     types-by-name)))
+    (for/fold ([tail (map (lambda (pair)
+			 (let* ((name (car pair))
+				(die (cdr pair))
+				(decl (recurse die)))
+			   (if (equal? (die-name die) name)
+			       decl
+			       (list* (car decl) (list 'public-name name) (cdr decl)))))
+		       name-die-pairs)])
+	      ([(name decl) types-by-name])
+	      (cons decl tail))))
 
-(define* (resolve-symbols ctx syms not-found)
-  (let ((externs (make-hash-table))
+(define (resolve-symbols ctx syms not-found)
+  (let ((externs (make-hash))
         (roots (read-die-roots ctx))
-        (by-pc (make-hash-table))
-        (by-location (make-hash-table)))
+        (by-pc (make-hash))
+        (by-location (make-hash)))
     (define (prepare-sym sym)
       (let ((name (elf-symbol-name sym))
             (value (elf-symbol-value sym)))
         (hash-set! externs name #f)
         (cond
          ((= (elf-symbol-type sym) STT_FUNC)
-          (hashv-set! by-pc value name))
+          (hash-set! by-pc value name))
          ((= (elf-symbol-type sym) STT_OBJECT)
-          (hashv-set! by-location value name)))))
+          (hash-set! by-location value name)))))
     (define (skip? ctx offset abbrev)
       (case (abbrev-tag abbrev)
         ((subprogram variable) #f)
@@ -534,30 +533,30 @@
     (define (visit-die die seed)
       (case (die-tag die)
         ((subprogram)
-         (and=> (hashv-ref by-pc (die-ref die 'low-pc))
+         (and=> (hash-ref by-pc (die-ref die 'low-pc))
                 (lambda (name)
                   (hash-set! externs name die))))
         ((variable)
          (match (die-ref die 'location)
-           ((('addr addr))
-            (and=> (hashv-ref by-location addr)
+           ((list (list 'addr addr))
+            (and=> (hash-ref by-location addr)
                    (lambda (name)
                      (hash-set! externs name die))))
            (_ #f)))))
     (for-each prepare-sym syms)
-    (for-each (cut fold-die-children <> visit-die #f #:skip? skip?)
+    (for-each (lambda (<>) (fold-die-children <> visit-die #f #:skip? skip?))
               roots)
     (let lp ((names (map elf-symbol-name syms)) (out '()))
       (match names
-        ((name . names)
+        ((cons name names)
          (cond
           ((hash-ref externs name)
            => (lambda (die)
-                (lp names (acons name die out))))
+                (lp names (cons (cons name die) out))))
           (else
            (not-found name)
            (lp names out))))
-        (()
+        ('()
          (reverse out))))))
 
 #;
@@ -572,8 +571,8 @@
 #;
 (fold-pubnames ctx find-pubnames #f)
 
-(define* (extract-one-definition die #:optional (depth 0))
-  (define* (visit-die x seen)
+(define (extract-one-definition die (depth 0))
+  (define (visit-die x seen)
     (define (recurse y)
       (visit-die y (cons x seen)))
     (define (visit-children y)

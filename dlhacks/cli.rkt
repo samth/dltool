@@ -1,3 +1,4 @@
+#lang racket
 ;; dlhacks CLI
 ;; Copyright (C) 2012 Andy Wingo <wingo@igalia.com>
 
@@ -18,25 +19,14 @@
 ;; 59 Temple Place - Suite 330        Fax:    +1-617-542-2652
 ;; Boston, MA  02111-1307,  USA       gnu@gnu.org
 
-(define-module (dlhacks cli)
-  #:use-module (ice-9 getopt-long)
-  #:use-module (ice-9 command-line)
-  #:use-module (ice-9 match)
-  #:use-module (ice-9 pretty-print)
-  #:use-module (ice-9 binary-ports)
-  #:use-module (system repl error-handling)
-  #:use-module (srfi srfi-1)
-  #:use-module (srfi srfi-9)
-  #:use-module (dlhacks)
-  #:use-module (dlhacks elf)
-  #:use-module (dlhacks dwarf)
-  #:export (main))
+(require pkg/commands "main.rkt" "elf.rkt" "dwarf.rkt" (only-in srfi/1 find))
 
 (define *common-options*
   '((help (single-char #\h))
     (version (single-char #\v))
     (debug)))
 
+#;
 (define (display-version)
   (version-etc "dltool"
                "0.1.0"
@@ -45,16 +35,11 @@
                #:command-name "dltool"
                #:license *LGPLv3+*))
 
-(define* (display-usage #:optional (port (current-output-port)))
+(define (display-usage (port (current-output-port)))
   (display "Usage: dltool [--help] [--version] COMMAND ARG...\n" port))
 
-(define-record-type <command>
-  (make-command name grammar docstring handler)
-  command?
-  (name command-name)
-  (grammar command-grammar)
-  (docstring command-docstring)
-  (handler command-handler))
+(define-struct command
+  (name grammar docstring handler))
 
 (define *commands* '())
 
@@ -70,25 +55,25 @@
                (symbol->string 'name)
                '((option param ...) ...)
                docstring
-               (case-lambda*
-                ((options . args)
+               (lambda
+                (options . args)
                  code code* ...)
-                ((options . unrecognized)
+                #;
+		((options . unrecognized)
                  (format (current-error-port) "Unexpected arguments: ~a\n"
                          unrecognized)
                  (format (current-error-port) "Usage: dltool ~a\n"
                          (car (string-split docstring #\newline)))
-                 (exit 1))))
+                 (exit 1)))
               *commands*)))
 
 (define (unrecognized-command name)
-  (with-output-to-port (current-error-port)
-    (lambda ()
-      (format #t "Unknown command: ~a\n" name)
-      (display-usage)
-      (newline)
-      (display "For more information and a list of available commands,\n")
-      (display "try `dltool help'.\n")))
+  (parameterize ([current-output-port (current-error-port)])
+    (format #t "Unknown command: ~a\n" name)
+    (display-usage)
+    (newline)
+    (display "For more information and a list of available commands,\n")
+    (display "try `dltool help'.\n"))
   (exit 1))
 
 (define-command ((help) options #:optional command)
@@ -136,6 +121,7 @@ separate debug objects, if needed.
 Note that dltool does not yet support compressed debug
 sections (e.g. \".zdebug_info\"), as used by some distributions.
 ")
+    #; ;; STH FIXME
     (emit-bug-reporting-address "dltool" "wingo@igalia.com"
                                 #:url "https://gitorious.org/guile-dlhacks/"))))
 
@@ -314,7 +300,7 @@ local to a compilation unit (e.g. inside the C file).  When using
      ((option-ref options 'help #f)
       (dispatch-command "help" '() debug?))
      ((option-ref options 'version #f)
-      (display-version))
+      (display "the version")) ;; fixme
      (else
       (match args
         ((command . args)

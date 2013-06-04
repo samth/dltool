@@ -1,4 +1,5 @@
-;;; Guile DWARF reader and writer
+#lang racket
+;;; DWARF reader and writer
 
 ;; Copyright (C) 2012, 2013 Free Software Foundation, Inc.
 
@@ -69,31 +70,35 @@
 ;;
 ;;; Code:
 
-(define-module (dlhacks dwarf)
-  #:use-module (rnrs bytevectors)
-  #:use-module (system foreign)
-  #:use-module (system base target)
-  #:use-module (dlhacks elf)
-  #:use-module ((srfi srfi-1) #:select (fold))
-  #:use-module (srfi srfi-9)
-  #:use-module (srfi srfi-9 gnu)
-  #:use-module (srfi srfi-11)
-  #:export (elf->dwarf-context
-            read-die-roots
-            fold-pubnames fold-aranges
+(require "elf.rkt")
+(provide 1+ logand logior logxor ash and=>)
+(define 1+ add1)
+(define logand bitwise-and)
+(define logior bitwise-ior)
+(define logxor bitwise-xor)
+(define ash arithmetic-shift)
+(require (only-in srfi/1 list-index))
+(define-syntax-rule (and=> a b)
+  (cond [a => b] [else #f]))
 
-            abbrev? abbrev-tag abbrev-has-children? abbrev-attrs abbrev-forms
+(require ffi/unsafe rnrs/bytevectors-6 (for-syntax syntax/parse racket/syntax))
 
-            die? die-ctx die-offset die-abbrev die-vals die-children
-            die-tag die-attrs die-forms die-ref
-            die-name die-specification die-qname
-
-            ctx-parent ctx-die ctx-start ctx-end ctx-children ctx-language
-
-            find-die-context find-die-by-offset find-die find-die-by-pc
-            read-die fold-die-list
-
-            fold-die-children die->tree))
+(provide elf->dwarf-context
+         read-die-roots
+         fold-pubnames fold-aranges
+         
+         abbrev? abbrev-tag abbrev-has-children? abbrev-attrs abbrev-forms
+         
+         die? die-ctx die-offset die-abbrev die-vals die-children
+         die-tag die-attrs die-forms die-ref
+         die-name die-specification die-qname
+         
+         ctx-parent ctx-die ctx-start ctx-end ctx-children ctx-language
+         
+         find-die-context find-die-by-offset find-die find-die-by-pc
+         read-die fold-die-list
+         
+         fold-die-children die->tree)
 
 ;;;
 ;;; First, define a number of constants.  The figures numbers refer to
@@ -104,11 +109,11 @@
 
 (define-syntax-rule (define-enumeration code->name (tag value) ...)
   (define code->name
-    (let ((table (make-hash-table)))
-      (hashv-set! table value 'tag)
+    (let ((table (make-hash)))
+      (hash-set! table value 'tag)
       ...
       (lambda (v)
-        (hashv-ref table v v)))))
+        (hash-ref table v v)))))
 
 ;; Figures 14 and 15: Tag names and codes.
 ;;
@@ -664,59 +669,27 @@
 ;;;
 ;;; A general configuration object.
 ;;;
+(define-struct meta
+  (vaddr memsz
+         path lib-path
+         info-start info-end
+         abbrevs-start abbrevs-end
+         strtab-start strtab-end
+         loc-start loc-end
+         pubnames-start pubnames-end
+         aranges-start aranges-end))
+(define make-dwarf-meta meta)
 
-(define-record-type <dwarf-meta>
-  (make-dwarf-meta vaddr memsz
-                   path lib-path
-                   info-start info-end
-                   abbrevs-start abbrevs-end
-                   strtab-start strtab-end
-                   loc-start loc-end
-                   pubnames-start pubnames-end
-                   aranges-start aranges-end)
-  dwarf-meta?
-  (vaddr meta-vaddr)
-  (memsz meta-memsz)
-  (path meta-path)
-  (lib-path meta-lib-path)
-  (info-start meta-info-start)
-  (info-end meta-info-end)
-  (abbrevs-start meta-abbrevs-start)
-  (abbrevs-end meta-abbrevs-end)
-  (strtab-start meta-strtab-start)
-  (strtab-end meta-strtab-end)
-  (loc-start meta-loc-start)
-  (loc-end meta-loc-end)
-  (pubnames-start meta-pubnames-start)
-  (pubnames-end meta-pubnames-end)
-  (aranges-start meta-aranges-start)
-  (aranges-end meta-aranges-end))
+(define-struct ctx
+  (bv word-size endianness meta
+      abbrevs
+      parent die start end [children #:mutable])
+  #:property prop:custom-write
+  (lambda (x w? port)
+    (fprintf port "<dwarf-context ~a>"
+             (number->string (eq-hash-code x) 16))))
 
-;; A context represents a namespace.  The root context is the
-;; compilation unit.  DIE nodes of type class-type, structure-type, or
-;; namespace may form child contexts.
-;;
-(define-record-type <dwarf-context>
-  (make-dwarf-context bv word-size endianness meta
-                      abbrevs
-                      parent die start end children)
-  dwarf-context?
-  (bv ctx-bv)
-  (word-size ctx-word-size)
-  (endianness ctx-endianness)
-  (meta ctx-meta)
-  (abbrevs ctx-abbrevs)
-  (parent ctx-parent)
-  (die ctx-die)
-  (start ctx-start)
-  (end ctx-end)
-  (children ctx-children set-children!))
-
-
-(set-record-type-printer! <dwarf-context>
-                          (lambda (x port)
-                            (format port "<dwarf-context ~a>"
-                                    (number->string (object-address x) 16))))
+(define make-dwarf-context ctx)
 
 ;;;
 ;;; Procedures for reading DWARF data.
@@ -819,14 +792,8 @@
           (1+ end)
           (lp (1+ end))))))
 
-(define-record-type <abbrev>
-  (make-abbrev code tag has-children? attrs forms)
-  abbrev?
-  (code abbrev-code)
-  (tag abbrev-tag)
-  (has-children? abbrev-has-children?)
-  (attrs abbrev-attrs)
-  (forms abbrev-forms))
+(define-struct abbrev
+  (code tag has-children? attrs forms))
 
 (define (read-abbrev ctx pos)
   (let*-values (((code pos) (read-uleb128 ctx pos))
@@ -846,8 +813,8 @@
                 (cons (form-code->name form) forms)
                 pos))))))
 
-(define* (read-abbrevs ctx pos
-                       #:optional (start (meta-abbrevs-start
+(define (read-abbrevs ctx pos
+                       (start (meta-abbrevs-start
                                           (ctx-meta ctx)))
                        (end (meta-abbrevs-end
                              (ctx-meta ctx))))
@@ -872,14 +839,14 @@
 
 ;; Values.
 ;;
-(define *readers* (make-hash-table))
-(define *scanners* (make-hash-table))
+(define *readers* (make-hash))
+(define *scanners* (make-hash))
 (define-syntax define-value-reader
   (syntax-rules ()
     ((_ form reader scanner)
      (begin
-       (hashq-set! *readers* 'form reader)
-       (hashq-set! *scanners* 'form scanner)))))
+       (hash-set! *readers* 'form reader)
+       (hash-set! *scanners* 'form scanner)))))
 
 (define-value-reader addr read-addr skip-addr)
 
@@ -992,12 +959,12 @@
       (skip-value ctx pos (form-code->name form)))))
 
 (define (read-value ctx pos form)
-  ((or (hashq-ref *readers* form)
+  ((or (hash-ref *readers* form)
        (error "unrecognized form" form))
    ctx pos))
 
 (define (skip-value ctx pos form)
-  ((or (hashq-ref *scanners* form)
+  ((or (hash-ref *scanners* form)
        (error "unrecognized form" form))
    ctx pos))
 
@@ -1098,12 +1065,12 @@
 
 (define-syntax-rule (define-attribute-parsers parse (name parser) ...)
   (define parse
-    (let ((parsers (make-hash-table)))
-      (hashq-set! parsers 'name parser)
+    (let ((parsers (make-hash)))
+      (hash-set! parsers 'name parser)
       ...
       (lambda (ctx attr val)
         (cond
-         ((hashq-ref parsers attr) => (lambda (p) (p ctx val)))
+         ((hash-ref parsers attr) => (lambda (p) (p ctx val)))
          (else val))))))
 
 (define-attribute-parsers parse-attribute
@@ -1122,13 +1089,10 @@
 
 ;; "Debugging Information Entries": DIEs.
 ;;
-(define-record-type <die>
-  (make-die ctx offset abbrev vals)
-  die?
-  (ctx die-ctx)
-  (offset die-offset)
-  (abbrev die-abbrev)
-  (vals %die-vals %set-die-vals!))
+(define-struct die
+  (ctx offset abbrev [%vals #:mutable]))
+(define %die-vals die-%vals)
+(define %set-die-vals! set-die-%vals!)
 
 (define (die-tag die)
   (abbrev-tag (die-abbrev die)))
@@ -1143,23 +1107,27 @@
   (let ((vals (%die-vals die)))
     (or vals
         (begin
-          (%set-die-vals! die (read-values (die-ctx die) (skip-leb128 (die-ctx die) (die-offset die)) (die-abbrev die)))
+          (%set-die-vals! die (read-values (die-ctx die) 
+                                           (skip-leb128 (die-ctx die) (die-offset die))
+                                           (die-abbrev die)))
           (die-vals die)))))
 
-(define* (die-next-offset die #:optional offset-vals)
+(define (die-next-offset die [offset-vals #f])
   (let ((ctx (die-ctx die)))
     (skip-values ctx (or offset-vals (skip-leb128 ctx (die-offset die)))
                  (die-abbrev die))))
 
-(define* (die-ref die attr #:optional default)
+(define (die-ref die attr [default #f])
   (cond
    ((list-index (die-attrs die) attr)
     => (lambda (n) (list-ref (die-vals die) n)))
    (else default)))
 
 (define (die-specification die)
-  (and=> (die-ref die 'specification)
-         (lambda (offset) (find-die-by-offset (die-ctx die) offset))))
+  (cond [(die-ref die 'specification) 
+         =>
+         (lambda (offset) (find-die-by-offset (die-ctx die) offset))]
+        [else #f]))
 
 (define (die-name die)
   (or (die-ref die 'name)
@@ -1211,7 +1179,7 @@
                 (skip-values ctx pos abbrev))
         (values #f pos))))
 
-(define* (die-sibling ctx abbrev offset #:optional offset-vals offset-end)
+(define (die-sibling ctx abbrev offset [offset-vals #f] [offset-end #f])
   (cond
    ((not (abbrev-has-children? abbrev))
     (or offset-end
@@ -1264,6 +1232,7 @@
   (or (read-die (find-die-context ctx offset) offset)
       (error "Failed to read DIE at offset" offset)))
 
+#;
 (define-syntax-rule (let/ec k e e* ...)
   (let ((tag (make-prompt-tag)))
     (call-with-prompt
@@ -1273,9 +1242,9 @@
          e e* ...))
      (lambda (_ res) res))))
 
-(define* (find-die roots pred #:key
-                   (skip? (lambda (ctx offset abbrev) #f))
-                   (recurse? (lambda (die) #t)))
+(define/key (find-die roots pred #:key
+                      (skip? (lambda (ctx offset abbrev) #f))
+                      (recurse? (lambda (die) #t)))
   (let/ec k
     (define (visit-die die)
       (cond
@@ -1322,7 +1291,7 @@
                    (seed (proc die seed)))
               (lp (die-sibling ctx abbrev offset #f pos) seed)))))))))
 
-(define* (fold-die-children die proc seed #:key
+(define/key (fold-die-children die proc seed #:key
                             (skip? (lambda (ctx offset abbrev) #f)))
   (if (abbrev-has-children? (die-abbrev die))
       (values (fold-die-list (die-ctx die) (die-next-offset die)
@@ -1334,7 +1303,7 @@
 
 (define (add-to-parent! ctx)
   (let ((parent (ctx-parent ctx)))
-    (set-children! parent
+    (set-ctx-children! parent
                    (append (ctx-children parent) (list ctx)))
     ctx))
 
@@ -1455,15 +1424,15 @@
               seed))
         seed)))
 
-(define* (elf->dwarf-context elf #:key (vaddr 0) (memsz 0)
+(define/key (elf->dwarf-context elf #:key (vaddr 0) (memsz 0)
                              (path #f) (lib-path path))
   (let* ((sections (elf-sections-by-name elf))
-         (info (assoc-ref sections ".debug_info"))
-         (abbrevs (assoc-ref sections ".debug_abbrev"))
-         (strtab (assoc-ref sections ".debug_str"))
-         (loc (assoc-ref sections ".debug_loc"))
-         (pubnames (assoc-ref sections ".debug_pubnames"))
-         (aranges (assoc-ref sections ".debug_aranges")))
+         (info (dict-ref sections ".debug_info"))
+         (abbrevs (dict-ref sections ".debug_abbrev"))
+         (strtab (dict-ref sections ".debug_str"))
+         (loc (dict-ref sections ".debug_loc"))
+         (pubnames (dict-ref sections ".debug_pubnames"))
+         (aranges (dict-ref sections ".debug_aranges")))
     (make-dwarf-context (elf-bytes elf)
                         (elf-word-size elf)
                         (elf-byte-order elf)
@@ -1499,10 +1468,10 @@
                         '())))
 
 (define (die->tree die)
-  (cons* (die-tag die)
+  (list* (die-tag die)
          (cons 'offset (die-offset die))
-         (reverse! (fold-die-children
+         (reverse (fold-die-children
                     die
                     (lambda (die seed)
                       (cons (die->tree die) seed))
-                    (fold acons '() (die-attrs die) (die-vals die))))))
+                    (foldr (λ (a b c) (cons (cons a b) c)) '() (die-attrs die) (die-vals die))))))
